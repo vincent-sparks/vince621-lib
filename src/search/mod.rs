@@ -1,8 +1,9 @@
-use winnow::ascii::{space0,digit1};
+use winnow::ascii::{space0,digit0,digit1};
 use winnow::error::ErrMode;
 use winnow::stream::{Offset, Stream};
 use winnow::{PResult, Parser};
 use winnow::token::one_of;
+use winnow::combinator::{seq, alt,opt};
 use std::fmt::{Debug,Display};
 
 pub trait BucketQueryParser<'a> {
@@ -55,6 +56,11 @@ impl<V> NestedQuery<V> {
             buckets: Vec::new(),
             inner: inner_parser,
         };
+        parser.buckets.push(Bucket {
+            min: 0,
+            max: 0,
+            target: 0,
+        });
         let start = query.checkpoint();
         match parser.parse_inner(&mut query, 0, true) {
             Ok(count) => {
@@ -91,6 +97,7 @@ impl<'a, V> NestedQueryParser<V> where V: BucketQueryParser<'a> {
                     return Err(ErrorKind::ExtraClose)
                 }
                 *query=&query[1..];
+                let _ = space0::<_, winnow::error::ErrorKind>.parse_next(query);
                 return Ok(count);
             }
             let checkpoint = query.checkpoint();
@@ -119,11 +126,9 @@ impl<'a, V> NestedQueryParser<V> where V: BucketQueryParser<'a> {
                     Ok(sub_count) => {
                         count+=sub_count;
                     },
+                    Err(ErrMode::Incomplete(_)) => panic!("inner parser should not operate in partial mode and should never ask for more data"),
                     Err(e) => {
-                        return Err(e
-                                   .into_inner()
-                                   .expect("validator parser should not operate in partial mode and should never ask for more data")
-                                   .into())
+                        return Err(e.into_inner().unwrap().into())
                     },
                 }
             }
@@ -163,9 +168,13 @@ fn parse_range(input: &mut &str) -> winnow::PResult<(Option<u8>, Option<u8>)> {
 /// This will match and leave the cursor where the caller of `Predicate::parse_next` wants you to
 /// stop parsing.
 pub fn end_of_tag<'a, E: winnow::error::ParserError<&'a str>>(input: &mut &'a str) -> PResult<(), E> {
-    if input.is_empty() || input.starts_with('}') {
+    if input.is_empty() || input.starts_with('}') || input.starts_with("all{") {
         Ok(())
     } else {
+        let e: winnow::error::IResult<_,_,winnow::error::ErrorKind> = seq!(digit1, opt(seq!('-',digit0)), '{').parse_peek(*input);
+        if e.is_ok() {
+            return Ok(());
+        }
         Err(ErrMode::Backtrack(E::from_error_kind(input, winnow::error::ErrorKind::Token)))
     }
 }
@@ -199,11 +208,11 @@ mod test {
 
             type Result = NullPredicate;
 
-            fn parse_next(&mut self, token: &mut &'a str, target_bucket: usize) -> PResult<u8, Self::Error> {
+            fn parse_next(&mut self, input: &mut &'a str, target_bucket: usize) -> PResult<u8, Self::Error> {
                 use winnow::combinator::{repeat_till, terminated};
                 let count: usize;
                 //let res = winnow::combinator::repeat_till::<_,_,Vec<_>,_,winnow::error::TreeError<&'a str>,_,_>(0..,winnow::combinator::terminated(winnow::ascii::digit1.parse_to::<usize>(), winnow::combinator::opt(' ')), winnow::combinator::eof).parse_next(token)?;
-                (count, _) = repeat_till(0.., terminated(digit1.parse_to::<usize>().map(|a: usize| {assert_eq!(a, target_bucket); 1}).context(StrContext::Label("bad digit")), opt(' ')).context(StrContext::Label("bad terminated")), end_of_tag.context(StrContext::Label("end of tag"))).parse_next(token)?;
+                (count, _) = repeat_till(0.., terminated(digit1.map(|token: &'a str| {assert_eq!(token.parse::<usize>().unwrap(), target_bucket, "{} {}", token, target_bucket); 1}).context(StrContext::Label("bad digit")), opt(' ')).context(StrContext::Label("bad terminated")), end_of_tag.context(StrContext::Label("end of tag"))).parse_next(input)?;
                 Ok(count as u8)
             }
 
