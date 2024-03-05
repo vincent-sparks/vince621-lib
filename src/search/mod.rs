@@ -1,142 +1,110 @@
 use winnow::ascii::{space0,digit0,digit1};
-use winnow::error::ErrMode;
+use winnow::error::{ErrMode, ErrorKind, ParserError};
 use winnow::stream::{Offset, Stream};
 use winnow::{PResult, Parser};
 use winnow::token::one_of;
 use winnow::combinator::{seq, alt,opt};
 use std::fmt::{Debug,Display};
 
-pub trait BucketQueryParser<'a> {
-    type Error: Debug + Display;
-    type Result: Predicate;
-    fn parse_next(&mut self, token: &mut &'a str, target_bucket: usize) -> PResult<u8, Self::Error>;
-    fn finalize(self) -> Self::Result;
-}
-
 pub trait Predicate {
     type Post;
     fn validate(&self, obj: &Self::Post, buckets: &mut [u8]);
 }
 
-struct Bucket {
+#[derive(Debug, PartialEq)]
+pub struct Bucket {
     min: u8,
     max: u8,
     target: usize,
 }
 
-struct NestedQueryParser<V> {
-    inner: V,
-    buckets: Vec<Bucket>,
+pub struct ParseBucket {
+    min: Option<u8>,
+    max: Option<u8>,
+    target: usize,
 }
 
-pub struct NestedQuery<V> {
-    inner: V,
-    buckets: Vec<Bucket>,
+// this is only a struct for readability's sake.  it could just as easily be a tuple.
+struct StackItem {
+    bucket_idx: usize,
+    count: u8,
+}
+
+pub struct NestedQueryParser {
+    stack: Vec<StackItem>,
+    pub buckets: Vec<ParseBucket>,
+}
+
+impl NestedQueryParser {
+    pub fn new() -> Self {
+        Self {
+            stack: vec![StackItem {bucket_idx: 0, count: 0}],
+            buckets: vec![ParseBucket {min: None, max: None, target: 0}],
+        }
+    }
+    pub fn increment_count(&mut self) {
+        let last_idx = self.stack.len()-1;
+        self.stack[last_idx].count+=1;
+    }
+    pub fn get_current_bucket(&self) -> usize {
+        let last_idx = self.stack.len()-1;
+        self.stack[last_idx].bucket_idx
+    }
+    pub fn finalize(mut self) -> Result<Vec<Bucket>, ParseError> {
+        if self.stack.len() > 1 {
+            return Err(ParseError::MissingClose);
+        }
+        let count = self.stack[0].count;
+        self.buckets[0].min.get_or_insert(count);
+        self.buckets[0].max.get_or_insert(count);
+        Ok(self.buckets.into_iter().map(|b| Bucket {
+            min: b.min.expect("bucket min should have been filled before calling finalize"),
+            max: b.max.expect("bucket max should have been filled before calling finalize"),
+            target: b.target,
+        }).collect())
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ErrorKind<E: Debug + Display> {
+pub enum ParseError {
     #[error("Missing }}")]
     MissingClose,
     #[error("Extra }}")]
     ExtraClose,
-    #[error("{0}")]
-    Validator(#[from] E),
 }
 
-#[derive(Debug)]
-struct ParseError<E: Debug + Display> {
-    offset: usize, 
-    error: ErrorKind<E>,
-}
+impl<'s, E> Parser<&'s str, usize, E> for NestedQueryParser where E: ParserError<&'s str> + winnow::error::FromExternalError<&'s str, ParseError> {
+    fn parse_next(&mut self, query: &mut &'s str) -> PResult<usize, E> {
+        if query.starts_with('}') {
+            if self.stack.len() < 2 {
+                return Err(ErrMode::Cut(E::from_external_error(query, ErrorKind::Token, ParseError::ExtraClose)));
+            }
+            *query=&query[1..];
+            let top = self.stack.pop().unwrap();
+            let bucket = &mut self.buckets[top.bucket_idx];
+            bucket.min.get_or_insert(top.count);
+            bucket.max.get_or_insert(top.count);
+            return Ok(self.stack[self.stack.len()-1].bucket_idx);
+        }
+        let (lower, upper) = parse_range.parse_next(query)?;
+        println!("parsed ok, query: {:?}", *query);
 
-impl<V> NestedQuery<V> {
-    pub fn new<'a, U: BucketQueryParser<'a, Result=V>>(inner_parser: U, mut query: &'a str) -> Result<Self, ParseError<U::Error>> {
-        let mut parser = NestedQueryParser {
-            buckets: Vec::new(),
-            inner: inner_parser,
-        };
-        parser.buckets.push(Bucket {
-            min: 0,
-            max: 0,
-            target: 0,
+        self.increment_count();
+
+        let next_target = self.buckets.len();
+        // the 0s are just temporary values that will be overwritten after the recursive
+        // call to parse_inner returns.
+        self.buckets.push(ParseBucket{
+            min: lower,
+            max: upper,
+            target: self.get_current_bucket(),
         });
-        let start = query.checkpoint();
-        match parser.parse_inner(&mut query, 0, true) {
-            Ok(count) => {
-                let mut buckets = parser.buckets;
-                buckets[0].min = count;
-                buckets[0].max = count;
-                Ok(Self {
-                    buckets,
-                    inner: parser.inner.finalize(),
-                })
-            },
-            Err(error) => {
-                Err(ParseError {
-                    offset: query.offset_from(&start),
-                    error,
-                })
-            }
-        }
+        self.stack.push(StackItem {bucket_idx: next_target, count: 0});
+        Ok(next_target)
     }
 }
 
-impl<'a, V> NestedQueryParser<V> where V: BucketQueryParser<'a> {
-    fn parse_inner(&mut self, query: &mut &'a str, target_bucket: usize, expect_eof: bool) -> Result<u8, ErrorKind<V::Error>> {
-        let mut count = 0;
-        loop {
-            if query.is_empty() {
-                if !expect_eof {
-                    return Err(ErrorKind::MissingClose)
-                }
-                return Ok(count);
-            }
-            if query.starts_with('}') {
-                if expect_eof {
-                    return Err(ErrorKind::ExtraClose)
-                }
-                *query=&query[1..];
-                let _ = space0::<_, winnow::error::ErrorKind>.parse_next(query);
-                return Ok(count);
-            }
-            let checkpoint = query.checkpoint();
-            println!("about to parse, query: {:?}", *query);
-            if let Ok((lower, upper)) = parse_range.parse_next(query) {
-                println!("parsed ok, query: {:?}", *query);
-                let next_target = self.buckets.len();
-                // the 0s are just temporary values that will be overwritten after the recursive
-                // call to parse_inner returns.
-                self.buckets.push(Bucket{
-                    min: lower.unwrap_or(0),
-                    max: upper.unwrap_or(0),
-                    target: target_bucket,
-                });
-                let sub_count = self.parse_inner(&mut *query, next_target, false)?;
-                if lower.is_none() {
-                    self.buckets[next_target].min=sub_count;
-                }
-                if upper.is_none() {
-                    self.buckets[next_target].max=sub_count;
-                }
-                count+=1;
-            } else {
-                query.reset(&checkpoint);
-                match self.inner.parse_next(&mut *query, target_bucket) {
-                    Ok(sub_count) => {
-                        count+=sub_count;
-                    },
-                    Err(ErrMode::Incomplete(_)) => panic!("inner parser should not operate in partial mode and should never ask for more data"),
-                    Err(e) => {
-                        return Err(e.into_inner().unwrap().into())
-                    },
-                }
-            }
-        }
-    }
-}
-
-fn parse_range(input: &mut &str) -> winnow::PResult<(Option<u8>, Option<u8>)> {
+fn parse_range<'a, E>(input: &mut &'a str) -> winnow::PResult<(Option<u8>, Option<u8>), E> where E: ParserError<&'a str> {
     if input.starts_with("all{") {
         *input=&input[4..];
         space0.parse_next(input)?; // should never fail
@@ -160,7 +128,6 @@ fn parse_range(input: &mut &str) -> winnow::PResult<(Option<u8>, Option<u8>)> {
         },
         _ => unreachable!(),
     };
-    space0.parse_next(input)?;
     Ok((Some(lower_bound), upper_bound))
 }
 
@@ -181,8 +148,12 @@ pub fn end_of_tag<'a, E: winnow::error::ParserError<&'a str>>(input: &mut &'a st
 
 #[cfg(test)]
 mod test {
+    use std::cell::RefCell;
+
+    use crate::search::test::why_do_i_have_to_hack_this::TryMapCut;
+
     use super::*;
-    use winnow::{combinator::opt, error::StrContext, PResult};
+    use winnow::{combinator::{cut_err, opt, repeat}, error::StrContext, PResult};
 
     struct NullPredicate;
     impl Predicate for NullPredicate {
@@ -192,34 +163,114 @@ mod test {
     }
     #[test]
     fn test_parse_range() {
-        assert_eq!(parse_range.parse("1{  ").unwrap(), (Some(1), Some(1)));
-        assert_eq!(parse_range.parse("1-{").unwrap(), (Some(1), None));
-        assert_eq!(parse_range.parse("1-2{").unwrap(), (Some(1), Some(2)));
-        assert_eq!(parse_range.parse("all{  ").unwrap(), (None, None));
-        assert_eq!(parse_range.parse("all{").unwrap(), (None, None));
+        assert_eq!(parse_range::<ErrorKind>.parse("1{").unwrap(), (Some(1), Some(1)));
+        assert_eq!(parse_range::<ErrorKind>.parse("1-{").unwrap(), (Some(1), None));
+        assert_eq!(parse_range::<ErrorKind>.parse("1-2{").unwrap(), (Some(1), Some(2)));
+        assert_eq!(parse_range::<ErrorKind>.parse("all{").unwrap(), (None, None));
+    }
+
+    #[derive(Debug)]
+    struct DummyError(String);
+
+    impl std::fmt::Display for DummyError{fn fmt(&self,fmt:&mut std::fmt::Formatter<'_>)->std::fmt::Result{fmt.write_str(self.0.as_str())}}
+
+    impl std::error::Error for DummyError{}
+    
+    /// Winnow does not include built-in functionality for a .try_map() to generate a ErrMode::Cut
+    /// rather than an ErrMod::Backtrack.  This is a copy paste of the entire TryMap class with one
+    /// line changed.
+    mod why_do_i_have_to_hack_this {
+        use winnow::*;
+        use winnow::stream::*;
+        use winnow::error::*;
+        pub struct TryMapCut<F, G, I, O, O2, E, E2>
+            where
+            F: Parser<I, O, E>,
+            G: FnMut(O) -> Result<O2, E2>,
+            I: Stream,
+            E: FromExternalError<I, E2>,
+            {
+                parser: F,
+                map: G,
+                i: core::marker::PhantomData<I>,
+                o: core::marker::PhantomData<O>,
+                o2: core::marker::PhantomData<O2>,
+                e: core::marker::PhantomData<E>,
+                e2: core::marker::PhantomData<E2>,
+            }
+
+        impl<F, G, I, O, O2, E, E2> TryMapCut<F, G, I, O, O2, E, E2>
+            where
+                F: Parser<I, O, E>,
+                G: FnMut(O) -> Result<O2, E2>,
+                I: Stream,
+                E: FromExternalError<I, E2>,
+                {
+                    #[inline(always)]
+                    pub(crate) fn new(parser: F, map: G) -> Self {
+                        Self {
+                            parser,
+                            map,
+                            i: Default::default(),
+                            o: Default::default(),
+                            o2: Default::default(),
+                            e: Default::default(),
+                            e2: Default::default(),
+                        }
+                    }
+                }
+
+        impl<F, G, I, O, O2, E, E2> Parser<I, O2, E> for TryMapCut<F, G, I, O, O2, E, E2>
+            where
+                F: Parser<I, O, E>,
+                G: FnMut(O) -> Result<O2, E2>,
+                I: Stream,
+                E: FromExternalError<I, E2>,
+                {
+                    #[inline]
+                    fn parse_next(&mut self, input: &mut I) -> PResult<O2, E> {
+                        let start = input.checkpoint();
+                        let o = self.parser.parse_next(input)?;
+                        let res = (self.map)(o).map_err(|err| {
+                            input.reset(&start);
+                            ErrMode::from_external_error(input, ErrorKind::Verify, err).cut()
+                        });
+                        res
+                    }
+                }
     }
 
     #[test]
     fn test_parse_query() {
-        use winnow::error::ContextError;
-        struct TestQueryParser;
-        impl<'a> BucketQueryParser<'a> for TestQueryParser {
-            type Error=winnow::error::TreeError<&'a str>;
-
-            type Result = NullPredicate;
-
-            fn parse_next(&mut self, input: &mut &'a str, target_bucket: usize) -> PResult<u8, Self::Error> {
-                use winnow::combinator::{repeat_till, terminated};
-                let count: usize;
-                //let res = winnow::combinator::repeat_till::<_,_,Vec<_>,_,winnow::error::TreeError<&'a str>,_,_>(0..,winnow::combinator::terminated(winnow::ascii::digit1.parse_to::<usize>(), winnow::combinator::opt(' ')), winnow::combinator::eof).parse_next(token)?;
-                (count, _) = repeat_till(0.., terminated(digit1.map(|token: &'a str| {assert_eq!(token.parse::<usize>().unwrap(), target_bucket, "{} {}", token, target_bucket); 1}).context(StrContext::Label("bad digit")), opt(' ')).context(StrContext::Label("bad terminated")), end_of_tag.context(StrContext::Label("end of tag"))).parse_next(input)?;
-                Ok(count as u8)
-            }
-
-            fn finalize(self) -> Self::Result {
-                NullPredicate
-            }
-        }
-        NestedQuery::new(TestQueryParser, "0 0 all{ 1 1 1-{ 2 2 } 1 } 0 1-2{ 3 }").unwrap();
+        //let res = repeat_till(0.., terminated(digit1.map(|token: &'a str| {assert_eq!(token.parse::<usize>().unwrap(), target_bucket, "{} {}", token, target_bucket); 1}).context(StrContext::Label("bad digit")), opt(' ')).context(StrContext::Label("bad terminated")), end_of_tag.context(StrContext::Label("end of tag"))).parse_next(input)?;
+        let parser = RefCell::new(NestedQueryParser::new());
+        let parser_ref = &parser;
+        let res: Result<(), winnow::error::ParseError<&'static str, winnow::error::ContextError<&'static str>>> = 
+            repeat(0.., seq!(
+                    alt((
+                            (|input: &mut &'static str| parser_ref.borrow_mut().parse_next(input).map(|_|())).context("parse"),
+                            TryMapCut::new(digit1.parse_to(), |idx: usize| {
+                                let mut parser = parser_ref.borrow_mut();
+                                parser.increment_count();
+                                if parser.get_current_bucket() == idx {
+                                    Ok(())
+                                } else {
+                                    Err(DummyError(format!("expected: {} found: {}", parser.get_current_bucket(), idx)))
+                                }
+                            }).context("number"),
+                    )),
+                    space0.context("space"),
+                    )).parse("0 all{ 1 1 1-{ 2 1{3 3} 1-2{4 4 4} 2 }1 1{5}}1{6} 0");
+        res.unwrap();
+        let buckets = parser.into_inner().finalize().unwrap();
+        assert_eq!(buckets, vec![
+                   Bucket{min: 4, max: 4, target: 0},
+                   Bucket{min: 5, max: 5, target: 0},
+                   Bucket{min: 1, max: 4, target: 1},
+                   Bucket{min: 1, max: 1, target: 2},
+                   Bucket{min: 1, max: 2, target: 2},
+                   Bucket{min: 1, max: 1, target: 1},
+                   Bucket{min: 1, max: 1, target: 0},
+        ]);
     }
 }
