@@ -6,21 +6,24 @@ use winnow::token::one_of;
 use winnow::combinator::{seq, alt,opt};
 use std::fmt::{Debug,Display};
 
+pub mod e6_posts;
+
 pub trait Predicate {
     type Post;
     fn validate(&self, obj: &Self::Post, buckets: &mut [u8]);
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq,Clone,Copy)]
 pub struct Bucket {
     min: u8,
     max: u8,
     target: usize,
 }
 
+#[derive(Debug, PartialEq,Clone,Copy)]
 pub struct ParseBucket {
-    min: Option<u8>,
-    max: Option<u8>,
+    pub min: Option<u8>,
+    pub max: Option<u8>,
     target: usize,
 }
 
@@ -35,6 +38,31 @@ pub struct NestedQueryParser {
     pub buckets: Vec<ParseBucket>,
 }
 
+#[derive(Debug)]
+pub struct NestedQuery<P> {
+    buckets: Vec<Bucket>,
+    predicate: P,
+}
+
+impl<P> NestedQuery<P> where P: Predicate {
+    pub fn new(buckets: Vec<Bucket>, predicate: P) -> Self {
+        Self{buckets,predicate}
+    }
+    pub fn validate(&self, post: &P::Post) -> bool {
+        let mut buckets = unsafe {Box::new_zeroed_slice(self.buckets.len()).assume_init()};
+        self.predicate.validate(post, &mut buckets);
+        for (idx, bucket) in self.buckets.iter().enumerate().rev() {
+            // don't work on the root bucket.
+            if idx==0 {break;}
+            // necessary precondition: bucket.target < idx
+            if buckets[idx] >= bucket.min && buckets[idx] <= bucket.max {
+                buckets[bucket.target]+=1;
+            }
+        }
+        buckets[0] >= self.buckets[0].min && buckets[0] <= self.buckets[0].max
+    }
+}
+
 impl NestedQueryParser {
     pub fn new() -> Self {
         Self {
@@ -42,9 +70,9 @@ impl NestedQueryParser {
             buckets: vec![ParseBucket {min: None, max: None, target: 0}],
         }
     }
-    pub fn increment_count(&mut self) {
+    pub fn increment_count(&mut self, count: u8) {
         let last_idx = self.stack.len()-1;
-        self.stack[last_idx].count+=1;
+        self.stack[last_idx].count+=count;
     }
     pub fn get_current_bucket(&self) -> usize {
         let last_idx = self.stack.len()-1;
@@ -89,7 +117,7 @@ impl<'s, E> Parser<&'s str, usize, E> for NestedQueryParser where E: ParserError
         let (lower, upper) = parse_range.parse_next(query)?;
         println!("parsed ok, query: {:?}", *query);
 
-        self.increment_count();
+        self.increment_count(1);
 
         let next_target = self.buckets.len();
         // the 0s are just temporary values that will be overwritten after the recursive
@@ -142,7 +170,7 @@ pub fn end_of_tag<'a, E: winnow::error::ParserError<&'a str>>(input: &mut &'a st
         if e.is_ok() {
             return Ok(());
         }
-        Err(ErrMode::Backtrack(E::from_error_kind(input, winnow::error::ErrorKind::Token)))
+        Err(ErrMode::Backtrack(E::from_error_kind(input, winnow::error::ErrorKind::Verify)))
     }
 }
 
@@ -153,7 +181,7 @@ mod test {
     use crate::search::test::why_do_i_have_to_hack_this::TryMapCut;
 
     use super::*;
-    use winnow::{combinator::{cut_err, opt, repeat}, error::StrContext, PResult};
+    use winnow::combinator::repeat;
 
     struct NullPredicate;
     impl Predicate for NullPredicate {
@@ -177,7 +205,7 @@ mod test {
     impl std::error::Error for DummyError{}
     
     /// Winnow does not include built-in functionality for a .try_map() to generate a ErrMode::Cut
-    /// rather than an ErrMod::Backtrack.  This is a copy paste of the entire TryMap class with one
+    /// rather than an ErrMode::Backtrack.  This is a copy paste of the entire TryMap class with one
     /// line changed.
     mod why_do_i_have_to_hack_this {
         use winnow::*;
@@ -242,7 +270,6 @@ mod test {
 
     #[test]
     fn test_parse_query() {
-        //let res = repeat_till(0.., terminated(digit1.map(|token: &'a str| {assert_eq!(token.parse::<usize>().unwrap(), target_bucket, "{} {}", token, target_bucket); 1}).context(StrContext::Label("bad digit")), opt(' ')).context(StrContext::Label("bad terminated")), end_of_tag.context(StrContext::Label("end of tag"))).parse_next(input)?;
         let parser = RefCell::new(NestedQueryParser::new());
         let parser_ref = &parser;
         let res: Result<(), winnow::error::ParseError<&'static str, winnow::error::ContextError<&'static str>>> = 
@@ -251,7 +278,7 @@ mod test {
                             (|input: &mut &'static str| parser_ref.borrow_mut().parse_next(input).map(|_|())).context("parse"),
                             TryMapCut::new(digit1.parse_to(), |idx: usize| {
                                 let mut parser = parser_ref.borrow_mut();
-                                parser.increment_count();
+                                parser.increment_count(1);
                                 if parser.get_current_bucket() == idx {
                                     Ok(())
                                 } else {
@@ -272,5 +299,26 @@ mod test {
                    Bucket{min: 1, max: 1, target: 1},
                    Bucket{min: 1, max: 1, target: 0},
         ]);
+    }
+
+    #[test]
+    fn test_validate() {
+        let buckets = vec![
+            Bucket{min:2,max:2,target:0},
+            Bucket{min:2,max:2,target:0},
+            Bucket{min:1,max:1,target:1},
+            Bucket{min:1,max:1,target:1},
+            Bucket{min:1,max:1,target:2},
+        ];
+        struct DummyValidator<'a>(&'a [u8]);
+        impl Predicate for DummyValidator<'_> {
+            type Post=();
+
+            fn validate(&self, _: &(), buckets: &mut [u8]) {
+                buckets.copy_from_slice(self.0);
+            }
+        }
+        assert!(NestedQuery::new(buckets.clone(), DummyValidator(&[1,0,0,1,1])).validate(&()));
+        assert!(!NestedQuery::new(buckets.clone(), DummyValidator(&[1,0,1,1,1])).validate(&()));
     }
 }

@@ -1,9 +1,12 @@
 use std::{num::NonZeroU32, str::FromStr};
 
+use hex::ToHex;
 
 
-#[derive(Debug, serde::Serialize,serde::Deserialize)]
+
+#[derive(Debug, serde::Serialize,serde::Deserialize, strum::Display)]
 #[serde(rename_all="lowercase")]
+#[strum(serialize_all="lowercase")]
 pub enum FileExtension {
     JPG,PNG,GIF,WEBM,SWF
 }
@@ -56,6 +59,25 @@ pub struct Post {
     pub file_ext: FileExtension,
     pub tags: Box<[u32]>,
     pub parent_id: Option<NonZeroU32>,
+}
+
+impl Post {
+    pub(crate) fn debug_default() -> Self {
+        Self {
+            id: unsafe {NonZeroU32::new_unchecked(u32::MAX)},
+            rating: Rating::Safe,
+            description: Box::from(""),
+            fav_count: 0,
+            score: 0,
+            md5: [0;16],
+            file_ext: FileExtension::PNG,
+            tags: Box::from([]),
+            parent_id: None,
+        }
+    }
+    pub fn url(&self) -> String {
+        format!("https://static1.e621.net/data/{:02x}/{:02x}/{}.{}", self.md5[0],self.md5[1], self.md5.encode_hex::<String>(), self.file_ext)
+    }
 }
 
 pub struct PostDatabase {

@@ -24,7 +24,7 @@ mod byteyarn_serialize {
         }
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Yarn, D::Error> {
-        de.deserialize_str(YarnVisitor)
+        de.deserialize_string(YarnVisitor)
     }
 }
 
@@ -82,6 +82,17 @@ pub struct Tag {
     // for some reason that is completely beyond me, some of the tags have negative post counts
     // no one has vacuumed the e621 database in a while and it *really shows*
     pub post_count: i32,
+}
+
+impl Tag {
+    pub(crate) fn new_debug(name: &'static str, id: u32) -> Self {
+        Self {
+            name: Yarn::from_static(name),
+            id,
+            category: TagCategory::General,
+            post_count: 1,
+        }
+    }
 }
 
 pub struct TagDatabase {
@@ -145,13 +156,12 @@ impl TagDatabase {
                         b'?' => {
                             my_query = &my_query[1..];
                             if my_tag.len() == 0 {return false;}
-                            my_tag = &my_tag[1..];
+                            my_tag = &my_tag[my_tag.ceil_char_boundary(1)..];
                         },
                         b'*' => {
                             my_query = &my_query[1..];
                             let next_pos = my_query.find(['*','?']);
                             let next_text = next_pos.map(|pos| &my_query[..pos]).unwrap_or(my_query);
-                            dbg!(&next_text);
                             if let Some(text_pos) = my_tag.find(next_text) {
                                 my_tag = &my_tag[text_pos+next_text.len()..];
                                 match next_pos {
@@ -190,8 +200,8 @@ impl TagDatabase {
             }
             ))
         } else {
-            // there are no wildcards anywhere in the string.  we can optimize.
-            Either::Right(self.search_raw(&query))
+            // there are no wildcards anywhere in the string.  this means it is a literal token.
+            Either::Right(self.get(query).into_iter())
         }
     }
 }
@@ -243,7 +253,7 @@ mod test {
         let responses: Vec<&str> = tag_db.search_wildcard("abc*fg").map(|x|x.name.as_str()).collect();
         assert_eq!(responses, vec!["abc_defg"]);
 
-        let responses: Vec<&str> = tag_db.search_wildcard("abc*fg*").map(|x|x.name.as_str()).collect();
+        let responses: Vec<&str> = tag_db.search_wildcard("abc_*fg*").map(|x|x.name.as_str()).collect();
         assert_eq!(responses, vec!["abc_defg", "abc_fghj"]);
     }
 }
