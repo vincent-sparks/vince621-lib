@@ -32,25 +32,21 @@ pub struct TagPredicate {
 struct TagQueryParser<'a> {
     db: &'a TagDatabase,
     tags: Vec<Tag>,
-    current_bucket: usize, // I really don't like storing this value in multiple places, but I
-                           // don't see how else to do it.
+    nested_query: NestedQueryParser,
 }
 impl<'a> TagQueryParser<'a> {
     fn new(db: &'a TagDatabase) -> Self {
         Self {
             db,
             tags: Vec::new(),
-            current_bucket: 0,
+            nested_query: NestedQueryParser::new(),
         }
     }
 
-    fn set_current_bucket(&mut self, bucket: usize) {
-        self.current_bucket = bucket;
-    }
-
-    fn finalize(mut self) -> TagPredicate {
+    fn finalize(mut self) -> Result<NestedQuery<TagPredicate>, super::ParseError> {
+        let buckets = self.nested_query.finalize()?;
         self.tags.sort_unstable_by_key(|tag| tag.tag_id);
-        TagPredicate{tags: self.tags.into_boxed_slice()}
+        Ok(NestedQuery::new(buckets, TagPredicate{tags: self.tags.into_boxed_slice()}))
     }
 }
 
@@ -67,19 +63,39 @@ impl std::fmt::Display for UnknownTag {
 
 impl std::error::Error for UnknownTag {}
 
-impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, UnknownTag>> Parser<&'a str, NonZeroU8, E> for TagQueryParser<'db> {
-    fn parse_next(&mut self, input: &mut &'a str) -> PResult<NonZeroU8, E> {
+impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, UnknownTag> + FromExternalError<&'a str, super::ParseError>> Parser<&'a str, (), E> for TagQueryParser<'db> {
+    fn parse_next(&mut self, input: &mut &'a str) -> PResult<(), E> {
         let checkpoint = input.checkpoint();
-        let token = take_till(1.., |c: char| c.is_whitespace()||c=='}').parse_next(input)?;
-        let mut count = 0u8;
-        for tag in self.db.search_wildcard(token) {
-            count += 1;
-            self.tags.push(Tag {tag_id: tag.id, bucket: self.current_bucket});
+        match self.nested_query.parse_next(input) {
+            Ok(_bucket) => Ok(()),
+            Err(ErrMode::Incomplete(_)) => panic!("NestedQueryParser should not operate in partial mode and never return Incomplete"),
+            Err(ErrMode::Cut(e)) => Err(ErrMode::Cut(e)),
+            Err(ErrMode::Backtrack(_)) => {
+                input.reset(&checkpoint);
+                let token = take_till(1.., |c: char| c.is_whitespace()||c=='}').parse_next(input)?;
+                let mut found_any = false;
+                let bucket = if token.starts_with('-') {
+                    0
+                } else if token.starts_with('~') {
+                    0
+                } else {
+                    self.nested_query.get_current_bucket()
+                };
+                for tag in self.db.search_wildcard(token) {
+                    found_any = true;
+                    self.tags.push(Tag {tag_id: tag.id, bucket});
+                    self.nested_query.increment_count(1);
+                }
+                if found_any {
+                    Ok(())
+                } else {
+                    // the caller should reset to some suitable point for us, but we need to point to the
+                    // error location for better error reporting.
+                    input.reset(&checkpoint);
+                    Err(ErrMode::Backtrack(E::from_external_error(input, ErrorKind::Slice, UnknownTag(token.to_owned()))))
+                }
+            }
         }
-        NonZeroU8::new(count).ok_or_else(|| {
-            input.reset(&checkpoint);
-            ErrMode::Backtrack(E::from_external_error(input, ErrorKind::Slice, UnknownTag(token.to_owned())))
-        })
     }
 }
 
@@ -109,24 +125,16 @@ impl Predicate for TagPredicate {
     }
 }
 
-pub fn parse_query<'a>(db: &TagDatabase, mut query: &'a str) -> Result<NestedQuery<TagPredicate>, TreeError<&'a str>> {
-    let nested_query = RefCell::new(NestedQueryParser::new());
-    let tag_parser = RefCell::new(TagQueryParser::new(db));
-
-    let nested_query_ref = &nested_query;
-    let tag_parser_ref = &tag_parser;
+pub fn parse_query<'a>(db: &TagDatabase, query: &'a str) -> Result<NestedQuery<TagPredicate>, TreeError<&'a str>> {
+    let mut tag_parser = TagQueryParser::new(db);
+    let tag_parser_ref = &mut tag_parser;
     repeat(1..,
            seq!(
-               alt((
-                       (|query: &mut &'a str| nested_query_ref.borrow_mut().parse_next(query).map(|bucket| tag_parser_ref.borrow_mut().set_current_bucket(bucket))).context(StrContext::Label("brackets")),
-                       (|query: &mut &'a str| tag_parser_ref.borrow_mut().parse_next(query).map(|count| nested_query_ref.borrow_mut().increment_count(count.get()))).context(StrContext::Label("tag")),
-               )),
+               |input: &mut &'a str| tag_parser_ref.parse_next(input),
                space0,
                )
       ).parse(query).map_err(|e| e.into_inner())?;
-    let buckets = nested_query.into_inner().finalize().map_err(|e| TreeError::from_external_error(&"", ErrorKind::Eof, e))?;
-    let tag_query = tag_parser.into_inner().finalize();
-    Ok(NestedQuery::new(buckets, tag_query))
+    tag_parser.finalize().map_err(|e| TreeError::from_external_error(&"", ErrorKind::Eof, e))
 }
 
 #[cfg(test)]
