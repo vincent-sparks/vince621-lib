@@ -33,8 +33,24 @@ struct StackItem {
     count: u8,
 }
 
-pub struct NestedQueryParser {
-    stack: Vec<StackItem>,
+struct StackFrame<Data> {
+    data: Data,
+    items: Vec<StackItem>,
+}
+
+impl<Data> StackFrame<Data> where Data: Default {
+    fn new(bucket_idx: usize) -> Self {
+        StackFrame {
+            data: Default::default(),
+            items: vec![
+                StackItem {bucket_idx, count: 0},
+            ]
+        }
+    }
+}
+
+pub struct NestedQueryParser<Data=()> {
+    stack: Vec<StackFrame<Data>>,
     pub buckets: Vec<ParseBucket>,
 }
 
@@ -61,35 +77,61 @@ impl<P> NestedQuery<P> where P: Predicate {
         }
         buckets[0] >= self.buckets[0].min && buckets[0] <= self.buckets[0].max
     }
+    pub fn into_inner(self) -> (Vec<Bucket>, P) {
+        let Self{buckets,predicate} = self;
+        (buckets,predicate)
+    }
 }
 
-impl NestedQueryParser {
+impl<Data: Default> NestedQueryParser<Data> {
     pub fn new() -> Self {
         Self {
-            stack: vec![StackItem {bucket_idx: 0, count: 0}],
+            stack: vec![StackFrame::new(0)],
             buckets: vec![ParseBucket {min: None, max: None, target: 0}],
         }
     }
-    pub fn increment_count(&mut self, count: u8) {
+    pub fn increment_count(&mut self, idx: usize, count: u8) {
         let last_idx = self.stack.len()-1;
-        self.stack[last_idx].count+=count;
+        self.stack[last_idx].items[idx].count += 1;
     }
-    pub fn get_current_bucket(&self) -> usize {
+    pub fn get_current_bucket(&self, idx: usize) -> usize {
         let last_idx = self.stack.len()-1;
-        self.stack[last_idx].bucket_idx
+        self.stack[last_idx].items[idx].bucket_idx
     }
     pub fn finalize(mut self) -> Result<Vec<Bucket>, ParseError> {
         if self.stack.len() > 1 {
             return Err(ParseError::MissingClose);
         }
-        let count = self.stack[0].count;
-        self.buckets[0].min.get_or_insert(count);
-        self.buckets[0].max.get_or_insert(count);
+        for item in self.stack[0].items.iter() {
+            self.buckets[item.bucket_idx].min.get_or_insert(item.count);
+            self.buckets[item.bucket_idx].max.get_or_insert(item.count);
+        }
         Ok(self.buckets.into_iter().map(|b| Bucket {
             min: b.min.expect("bucket min should have been filled before calling finalize"),
             max: b.max.expect("bucket max should have been filled before calling finalize"),
             target: b.target,
         }).collect())
+    }
+    /**
+     * Creates a new ancillary bucket and returns the index of the newly created slot.  To get the
+     * index of the bucket, use get_current_bucket().
+     */
+    pub fn new_ancillary_bucket(&mut self, min: Option<u8>, max: Option<u8>) -> usize {
+        let last_idx = self.stack.len()-1;
+        let stack_frame = &mut self.stack[last_idx].items;
+        let new_slot_idx = stack_frame.len();
+        let new_bucket_idx = self.buckets.len();
+        stack_frame[0].count+=1;
+        self.buckets.push(ParseBucket{min, max, target: stack_frame[0].bucket_idx});
+        stack_frame.push(StackItem {
+            bucket_idx: new_bucket_idx,
+            count: 0,
+        });
+        new_slot_idx
+    }
+    pub fn get_data(&mut self) -> &mut Data {
+        let last_idx = self.stack.len() - 1;
+        &mut self.stack[last_idx].data
     }
 }
 
@@ -101,7 +143,7 @@ pub enum ParseError {
     ExtraClose,
 }
 
-impl<'s, E> Parser<&'s str, usize, E> for NestedQueryParser where E: ParserError<&'s str> + winnow::error::FromExternalError<&'s str, ParseError> {
+impl<'s, E, D> Parser<&'s str, usize, E> for NestedQueryParser<D> where E: ParserError<&'s str> + winnow::error::FromExternalError<&'s str, ParseError>, D: Default {
     fn parse_next(&mut self, query: &mut &'s str) -> PResult<usize, E> {
         if query.starts_with('}') {
             if self.stack.len() < 2 {
@@ -109,15 +151,17 @@ impl<'s, E> Parser<&'s str, usize, E> for NestedQueryParser where E: ParserError
             }
             *query=&query[1..];
             let top = self.stack.pop().unwrap();
-            let bucket = &mut self.buckets[top.bucket_idx];
-            bucket.min.get_or_insert(top.count);
-            bucket.max.get_or_insert(top.count);
-            return Ok(self.stack[self.stack.len()-1].bucket_idx);
+            for item in top.items.iter() {
+                let bucket = &mut self.buckets[item.bucket_idx];
+                bucket.min.get_or_insert(item.count);
+                bucket.max.get_or_insert(item.count);
+            }
+            return Ok(self.stack[self.stack.len()-1].items[0].bucket_idx);
         }
         let (lower, upper) = parse_range.parse_next(query)?;
         println!("parsed ok, query: {:?}", *query);
 
-        self.increment_count(1);
+        self.increment_count(0,1);
 
         let next_target = self.buckets.len();
         // the 0s are just temporary values that will be overwritten after the recursive
@@ -125,9 +169,9 @@ impl<'s, E> Parser<&'s str, usize, E> for NestedQueryParser where E: ParserError
         self.buckets.push(ParseBucket{
             min: lower,
             max: upper,
-            target: self.get_current_bucket(),
+            target: self.get_current_bucket(0),
         });
-        self.stack.push(StackItem {bucket_idx: next_target, count: 0});
+        self.stack.push(StackFrame::new(next_target));
         Ok(next_target)
     }
 }
@@ -270,7 +314,7 @@ mod test {
 
     #[test]
     fn test_parse_query() {
-        let parser = RefCell::new(NestedQueryParser::new());
+        let parser = RefCell::new(NestedQueryParser::<()>::new());
         let parser_ref = &parser;
         let res: Result<(), winnow::error::ParseError<&'static str, winnow::error::ContextError<&'static str>>> = 
             repeat(0.., seq!(
@@ -278,11 +322,11 @@ mod test {
                             (|input: &mut &'static str| parser_ref.borrow_mut().parse_next(input).map(|_|())).context("parse"),
                             TryMapCut::new(digit1.parse_to(), |idx: usize| {
                                 let mut parser = parser_ref.borrow_mut();
-                                parser.increment_count(1);
-                                if parser.get_current_bucket() == idx {
+                                parser.increment_count(0, 1);
+                                if parser.get_current_bucket(0) == idx {
                                     Ok(())
                                 } else {
-                                    Err(DummyError(format!("expected: {} found: {}", parser.get_current_bucket(), idx)))
+                                    Err(DummyError(format!("expected: {} found: {}", parser.get_current_bucket(0), idx)))
                                 }
                             }).context("number"),
                     )),
@@ -301,6 +345,14 @@ mod test {
         ]);
     }
 
+    struct DummyValidator<'a>(&'a [u8]);
+    impl Predicate for DummyValidator<'_> {
+        type Post=();
+
+        fn validate(&self, _: &(), buckets: &mut [u8]) {
+            buckets.copy_from_slice(self.0);
+        }
+    }
     #[test]
     fn test_validate() {
         let buckets = vec![
@@ -310,15 +362,15 @@ mod test {
             Bucket{min:1,max:1,target:1},
             Bucket{min:1,max:1,target:2},
         ];
-        struct DummyValidator<'a>(&'a [u8]);
-        impl Predicate for DummyValidator<'_> {
-            type Post=();
-
-            fn validate(&self, _: &(), buckets: &mut [u8]) {
-                buckets.copy_from_slice(self.0);
-            }
-        }
         assert!(NestedQuery::new(buckets.clone(), DummyValidator(&[1,0,0,1,1])).validate(&()));
         assert!(!NestedQuery::new(buckets.clone(), DummyValidator(&[1,0,1,1,1])).validate(&()));
+    }
+    #[test]
+    fn test_zero() {
+        let buckets = vec![
+            Bucket{min:2,max:2,target:0},
+            Bucket{min:0,max:0,target:1},
+        ];
+        assert!(!NestedQuery::new(buckets, DummyValidator(&[1,1])).validate(&()));
     }
 }
