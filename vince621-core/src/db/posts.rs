@@ -4,9 +4,10 @@ use hex::ToHex;
 
 
 
-#[derive(Debug, serde::Serialize,serde::Deserialize, strum::Display)]
+#[derive(Debug, serde::Serialize,serde::Deserialize, strum::Display,Clone,Copy)]
 #[serde(rename_all="lowercase")]
 #[strum(serialize_all="lowercase")]
+#[repr(u8)]
 pub enum FileExtension {
     JPG,PNG,GIF,WEBM,SWF
 }
@@ -43,12 +44,13 @@ impl<'de> serde::Deserialize<'de> for Rating {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug,serde::Serialize,Clone,Copy)]
+#[repr(u8)]
 pub enum Rating {
     Safe, Questionable, Explicit
 }
 
-#[derive(Debug)]
+#[derive(Debug,serde::Serialize)]
 pub struct Post {
     pub id: NonZeroU32,
     pub rating: Rating,
@@ -85,7 +87,11 @@ pub struct PostDatabase {
 }
 
 impl PostDatabase {
-    pub(crate) fn new(posts: Box<[Post]>) -> Self {
+    /**
+     * Create a new post database given a list of posts loaded from somewhere.  This list is
+     * assumed to already be sorted by ID.
+     */
+    pub fn new(posts: Box<[Post]>) -> Self {
         Self {posts}
     }
     

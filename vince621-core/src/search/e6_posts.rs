@@ -207,14 +207,14 @@ mod test {
     use super::*;
     #[test]
     fn test_tag_query() {
-        let tag_db = TagDatabase::new(vec![
+        let tag_db = TagDatabase::new([
             Tag::new_debug("a", 1),
             Tag::new_debug("aa", 2),
             Tag::new_debug("ab", 3),
             Tag::new_debug("ac", 4),
             Tag::new_debug("abc", 5),
             Tag::new_debug("d", 6),
-        ]);
+        ].into());
         let query = parse_query(&tag_db, "1-{a*}d").unwrap();
         dbg!(&query);
         assert!(query.validate(&Post {
@@ -227,7 +227,7 @@ mod test {
     fn test_same_tag() {
         let db = TagDatabase::new(vec![
             Tag::new_debug("a", 1),
-        ]);
+        ].into());
         let validator = parse_query(&db, "a 0{ a }").unwrap();
         let (buckets, validator) = validator.into_inner();
         let mut a = [0u8;2];

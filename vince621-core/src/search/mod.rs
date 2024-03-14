@@ -1,3 +1,6 @@
+/// General purpose parser for grammars of the type `a 1-{ b c d 2-3{ e f g h } } 2{ i j k }`.
+/// 
+/// 
 use winnow::ascii::{space0,digit0,digit1};
 use winnow::error::{ErrMode, ErrorKind, ParserError};
 use winnow::stream::{Offset, Stream};
@@ -92,7 +95,7 @@ impl<Data: Default> NestedQueryParser<Data> {
     }
     pub fn increment_count(&mut self, idx: usize, count: u8) {
         let last_idx = self.stack.len()-1;
-        self.stack[last_idx].items[idx].count += 1;
+        self.stack[last_idx].items[idx].count += count;
     }
     pub fn get_current_bucket(&self, idx: usize) -> usize {
         let last_idx = self.stack.len()-1;
@@ -129,6 +132,9 @@ impl<Data: Default> NestedQueryParser<Data> {
         });
         new_slot_idx
     }
+    /**
+     * Returns a mutable reference to user data pertaining to the current stack frame.
+     */
     pub fn get_data(&mut self) -> &mut Data {
         let last_idx = self.stack.len() - 1;
         &mut self.stack[last_idx].data

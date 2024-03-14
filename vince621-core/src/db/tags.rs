@@ -116,12 +116,15 @@ mod phfwrapper {
 }
 
 impl TagDatabase {
-    pub(crate) fn new(mut tags: Vec<Tag>) -> Self {
+    /**
+     * Create a new tag database given a list of tags, which is not assumed to be sorted.
+     */
+    pub fn new(mut tags: Box<[Tag]>) -> Self {
         tags.sort_unstable_by(|t1,t2| t1.name.cmp(&t2.name));
         #[cfg(feature="phf")]
         let map = phf_generator::generate_hash(unsafe { std::mem::transmute::<&[Tag], &[phfwrapper::TagHashWrapper]>(&tags) });
         Self {
-            tags: tags.into_boxed_slice(),
+            tags,
             #[cfg(feature="phf")] map,
         }
     }
@@ -211,7 +214,7 @@ mod test {
     use super::*;
     #[test]
     fn test_wildcards() {
-        let tag_db = TagDatabase::new(vec![
+        let tag_db = TagDatabase::new([
             Tag {
                 category: TagCategory::General,
                 id: 1,
@@ -236,7 +239,7 @@ mod test {
                 name: Yarn::from_static("abd_fghj"),
                 post_count: 0,
             },
-        ]);
+        ].into());
 
         let responses: Vec<&str> = tag_db.search_wildcard("abc*").map(|x|x.name.as_str()).collect();
         assert_eq!(responses, vec!["abc_defg", "abc_fghj"]);
