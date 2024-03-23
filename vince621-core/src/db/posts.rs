@@ -4,7 +4,7 @@ use hex::ToHex;
 
 
 
-#[derive(Debug, serde::Serialize,serde::Deserialize, strum::Display,Clone,Copy)]
+#[derive(Debug, serde::Serialize,serde::Deserialize, strum::Display,Clone,Copy, num_derive::FromPrimitive,Eq,PartialEq)]
 #[serde(rename_all="lowercase")]
 #[strum(serialize_all="lowercase")]
 #[repr(u8)]
@@ -44,17 +44,17 @@ impl<'de> serde::Deserialize<'de> for Rating {
     }
 }
 
-#[derive(Debug,serde::Serialize,Clone,Copy)]
+#[derive(Debug,serde::Serialize,Clone,Copy, num_derive::FromPrimitive,Eq,PartialEq)]
 #[repr(u8)]
 pub enum Rating {
     Safe, Questionable, Explicit
 }
 
-#[derive(Debug,serde::Serialize)]
+#[derive(Debug,serde::Serialize,PartialEq)]
 pub struct Post {
     pub id: NonZeroU32,
     pub rating: Rating,
-    pub description: Box<str>,
+    //pub description: Box<str>,
     pub fav_count: u32,
     pub score: i32,
     pub md5: [u8;16], // not storing this as a string.  we have four million of these.  every byte counts!
@@ -68,7 +68,7 @@ impl Post {
         Self {
             id: unsafe {NonZeroU32::new_unchecked(u32::MAX)},
             rating: Rating::Safe,
-            description: Box::from(""),
+            //description: Box::from(""),
             fav_count: 0,
             score: 0,
             md5: [0;16],
