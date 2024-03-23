@@ -174,7 +174,7 @@ impl TagDatabase {
                                     None => {
                                         // we matched everything after the asterisk, and there
                                         // are no more wildcards in the query.  if there's
-                                        // more data in the input after the text we matched,
+                                        // more data in the tag after the text we matched,
                                         // we fail -- the user would've added another * at the end
                                         // of the query if they meant to include that.  if the
                                         // query did end with an *, next_text (the text after the
@@ -189,7 +189,10 @@ impl TagDatabase {
                         _ => {
                             if let Some(next_pos) = my_query.find(['*','?']) {
                                 if my_tag.len() < next_pos {return false;}
-                                if my_tag[..next_pos] != my_query[..next_pos] {return false;}
+                                // compare using byte slices rather than string slices, in case
+                                // next_pos happens to not fall on a char boundary when indexed
+                                // into my_tag.
+                                if my_tag.as_bytes()[..next_pos] != my_query.as_bytes()[..next_pos] {return false;}
                                 my_tag = &my_tag[next_pos..];
                                 my_query = &my_query[next_pos..];
                             } else {
@@ -199,7 +202,7 @@ impl TagDatabase {
                         }
                     }
                 }
-                return true;
+                return my_tag.is_empty();
             }
             ))
         } else {
@@ -258,5 +261,8 @@ mod test {
 
         let responses: Vec<&str> = tag_db.search_wildcard("abc_*fg*").map(|x|x.name.as_str()).collect();
         assert_eq!(responses, vec!["abc_defg", "abc_fghj"]);
+
+        let responses: Vec<&str> = tag_db.search_wildcard("abc?").map(|x|x.name.as_str()).collect();
+        assert_eq!(responses, Vec::<&str>::new());
     }
 }
