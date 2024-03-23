@@ -29,7 +29,7 @@ pub struct E6Database {
 /// The URLs passed to the method are guaranteed to begin with "https://e621.net/db_export/".  The
 /// first call to the callback will be this string exactly, which is expected to return an HTML
 /// page from which the date of the most recent DB export is parsed.  To avoid this first call, you
-/// may call [load_date] instead.
+/// may call [load_date] instead, 
 ///
 pub fn load<R: BufRead>(download_callback: impl Fn(String, &'static str) -> std::io::Result<R>) -> csv::Result<E6Database> {
     let mut response = Vec::new();
@@ -52,7 +52,8 @@ pub fn load<R: BufRead>(download_callback: impl Fn(String, &'static str) -> std:
 }
 
 /// Load the database as it appeared on the specified date, which must be YYYY-MM-DD format.  If the
-/// download_callback performs an actual HTTP request, this date may be up to two days in the past.
+/// download_callback accesses the internet to download the specified file, this date may be up to three
+/// days in the past.
 pub fn load_date<R: BufRead>(date: &str, download_callback: impl Fn(String, &'static str) -> std::io::Result<R>) -> csv::Result<E6Database> {
     let tag_csvgz = download_callback(format!("https://e621.net/db_export/tags-{}.csv.gz", date), "application/octet-stream")?;
 

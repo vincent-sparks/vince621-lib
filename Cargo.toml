@@ -1,0 +1,2 @@
+[workspace]
+members=["vince621-core", "vince621-csv", "vince621-serialization"]

@@ -1,15 +1,12 @@
-use std::{io::Read, marker::PhantomData, num::NonZeroU32};
-use hex::FromHex;
-use serde::de::Deserializer;
+use std::{io::Read, num::NonZeroU32};
 
-use crate::db::{posts::{FileExtension, Post, PostDatabase, Rating}, tags::TagDatabase};
-use crossbeam_channel::{Sender, Receiver};
+use vince621_core::db::{posts::{FileExtension, Post, PostDatabase, Rating}, tags::TagDatabase};
 
 #[derive(serde::Deserialize)]
 struct CSVPost {
     id: NonZeroU32,
     parent_id: Option<NonZeroU32>,
-    description: Box<str>,
+    //description: Box<str>,
     fav_count: u32,
     rating: Rating,
     score: i32,
@@ -41,7 +38,7 @@ pub fn load_post_database<R: Read>(tag_db: &TagDatabase, mut rdr: csv::Reader<R>
         posts.push(Post {
             id: post.id,
             parent_id: post.parent_id,
-            description: post.description,
+            //description: post.description,
             fav_count: post.fav_count,
             rating: post.rating,
             score: post.score,
