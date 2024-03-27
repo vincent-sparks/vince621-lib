@@ -15,7 +15,7 @@ use winnow::prelude::*;
 
 use crate::db::tags::TagDatabase;
 
-use super::{NestedQueryParser, Predicate};
+use super::{NestedQueryParser, Kernel};
 use super::NestedQuery;
 
 #[derive(Debug)]
@@ -31,17 +31,17 @@ struct StackFrameData {
 }
 
 #[derive(Debug)]
-pub struct TagPredicate {
+pub struct PostKernel {
     tags: Box<[Tag]>,
 }
 
-struct TagQueryParser<'a> {
+pub(crate) struct TagQueryParser<'a> {
     db: &'a TagDatabase,
     tags: Vec<Tag>,
     nested_query: NestedQueryParser<StackFrameData>,
 }
 impl<'a> TagQueryParser<'a> {
-    fn new(db: &'a TagDatabase) -> Self {
+    pub fn new(db: &'a TagDatabase) -> Self {
         Self {
             db,
             tags: Vec::new(),
@@ -49,10 +49,10 @@ impl<'a> TagQueryParser<'a> {
         }
     }
 
-    fn finalize(mut self) -> Result<NestedQuery<TagPredicate>, super::ParseError> {
+    pub fn finalize(mut self) -> Result<NestedQuery<PostKernel>, super::ParseError> {
         let buckets = self.nested_query.finalize()?;
         self.tags.sort_unstable_by_key(|tag| tag.tag_id);
-        Ok(NestedQuery::new(buckets, TagPredicate{tags: self.tags.into_boxed_slice()}))
+        Ok(NestedQuery::new(buckets, PostKernel{tags: self.tags.into_boxed_slice()}))
     }
 }
 
@@ -119,7 +119,7 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, UnknownTag> +
                     // do, we MUST match the e621 behavior exactly.
                     //
                     // i have decided to split the difference.  tokens matched by a wildcard go
-                    // into the "any" bucket if and only if they are in the outermost grouping
+                    // into an "any" bucket if and only if they are in the outermost grouping
                     // (i.e. if the currently targeted bucket in ancillary slot 0 (the default
                     // slot) is bucket 0 (the root bucket).
                     // since e621 does not support grouping at all, this will match the e621
@@ -128,18 +128,25 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, UnknownTag> +
 
                     if token.starts_with('~') {
                         token=&token[1..];
+                        // important: only reuse the "any" bucket if the token starts with a tilde!
+                        // we don't want a*b c*d to go into the same bucket otherwise!
+
+                        // side note: unfortunately i cannot use get_or_insert_with() here due to the
+                        // borrow checker being dumb.
+                        match self.nested_query.get_data().tilde_slot {
+                            Some(x) => x,
+                            None => {
+                                let new_slot = self.nested_query.new_ancillary_bucket(Some(1), None);
+                                self.nested_query.get_data().tilde_slot = Some(new_slot);
+                                new_slot
+                            }
+                        }
+                    } else {
+                        // if there is no ~ at the beginning and this is a wildcard expression, put
+                        // it in its own bucket.
+                        self.nested_query.new_ancillary_bucket(Some(1), None)
                     }
                     
-                    // side note: unfortunately i cannot use get_or_insert_with() here due to the
-                    // borrow checker being dumb.
-                    match self.nested_query.get_data().tilde_slot {
-                        Some(x) => x,
-                        None => {
-                            let new_slot = self.nested_query.new_ancillary_bucket(Some(1), None);
-                            self.nested_query.get_data().tilde_slot = Some(new_slot);
-                            new_slot
-                        }
-                    }
                 } else {
                     0
                 };
@@ -161,7 +168,7 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, UnknownTag> +
     }
 }
 
-impl Predicate for TagPredicate {
+impl Kernel for PostKernel {
     type Post = crate::db::posts::Post;
 
     fn validate(&self, post: &Self::Post, buckets: &mut [u8]) {
@@ -187,7 +194,7 @@ impl Predicate for TagPredicate {
     }
 }
 
-pub fn parse_query<'a>(db: &TagDatabase, query: &'a str) -> Result<NestedQuery<TagPredicate>, TreeError<&'a str>> {
+pub fn parse_query<'a>(db: &TagDatabase, query: &'a str) -> Result<NestedQuery<PostKernel>, TreeError<&'a str>> {
     let mut tag_parser = TagQueryParser::new(db);
     let tag_parser_ref = &mut tag_parser;
     repeat(1..,

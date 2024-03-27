@@ -11,7 +11,7 @@ use std::fmt::{Debug,Display};
 
 pub mod e6_posts;
 
-pub trait Predicate {
+pub trait Kernel {
     type Post;
     fn validate(&self, obj: &Self::Post, buckets: &mut [u8]);
 }
@@ -57,17 +57,17 @@ pub struct NestedQueryParser<Data=()> {
     pub buckets: Vec<ParseBucket>,
 }
 
-#[derive(Debug)]
-pub struct NestedQuery<P> {
+#[derive(Debug,PartialEq)]
+pub struct NestedQuery<K> {
     buckets: Vec<Bucket>,
-    predicate: P,
+    predicate: K,
 }
 
-impl<P> NestedQuery<P> where P: Predicate {
-    pub fn new(buckets: Vec<Bucket>, predicate: P) -> Self {
+impl<K> NestedQuery<K> where K: Kernel {
+    pub fn new(buckets: Vec<Bucket>, predicate: K) -> Self {
         Self{buckets,predicate}
     }
-    pub fn validate(&self, post: &P::Post) -> bool {
+    pub fn validate(&self, post: &K::Post) -> bool {
         let mut buckets = unsafe {Box::new_zeroed_slice(self.buckets.len()).assume_init()};
         self.predicate.validate(post, &mut buckets);
         for (idx, bucket) in self.buckets.iter().enumerate().rev() {
@@ -233,8 +233,8 @@ mod test {
     use super::*;
     use winnow::combinator::repeat;
 
-    struct NullPredicate;
-    impl Predicate for NullPredicate {
+    struct NullKernel;
+    impl Kernel for NullKernel {
         type Post=();
         fn validate(&self, obj: &Self::Post, buckets: &mut [u8]) {
         }
@@ -352,7 +352,7 @@ mod test {
     }
 
     struct DummyValidator<'a>(&'a [u8]);
-    impl Predicate for DummyValidator<'_> {
+    impl Kernel for DummyValidator<'_> {
         type Post=();
 
         fn validate(&self, _: &(), buckets: &mut [u8]) {
