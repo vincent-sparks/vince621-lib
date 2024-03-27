@@ -81,7 +81,7 @@ impl<K> NestedQuery<K> where K: Kernel {
         }
         buckets[0] >= self.buckets[0].min && buckets[0] <= self.buckets[0].max
     }
-    pub fn into_inner(self) -> (Vec<Bucket>, P) {
+    pub fn into_inner(self) -> (Vec<Bucket>, K) {
         let Self{buckets,predicate} = self;
         (buckets,predicate)
     }
