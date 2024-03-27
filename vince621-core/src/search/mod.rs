@@ -10,6 +10,7 @@ use winnow::combinator::{seq, alt,opt};
 use std::fmt::{Debug,Display};
 
 pub mod e6_posts;
+pub mod e6_pools;
 
 pub trait Kernel {
     type Post;
