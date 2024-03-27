@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
-use winnow::ascii::{space0, space1};
-use winnow::combinator::{alt, eof, repeat, repeat_till, seq};
+use winnow::ascii::{digit1, space0, space1};
+use winnow::combinator::{alt, eof, opt, repeat, repeat_till, seq};
 use winnow::error::{ErrMode, ErrorKind, FromExternalError, ParseError, ParserError, TreeError};
 use winnow::stream::Stream as _;
 use winnow::token::{take_till, take_until};
@@ -10,7 +10,6 @@ use winnow::{PResult, Parser};
 use crate::db::pools::Pool;
 use crate::db::posts::{Post, PostDatabase};
 use crate::db::tags::TagDatabase;
-use crate::search::parse_range;
 
 use super::{Kernel, NestedQuery, NestedQueryParser};
 use super::e6_posts::{PostKernel, TagQueryParser};
@@ -22,9 +21,15 @@ struct SequenceStep {
 }
 
 #[derive(Debug)]
+struct Counter {
+    query: NestedQuery<PostKernel>,
+    min: Option<u8>,
+    max: Option<u8>,
+}
+
+#[derive(Debug)]
 pub struct PoolKernelData {
-    alls: Vec<(NestedQuery<PostKernel>, usize)>,
-    anys: Vec<(NestedQuery<PostKernel>, usize)>,
+    counters: Vec<(Counter, usize)>,
     sequences: Vec<(Vec<SequenceStep>, usize)>,
 }
 
@@ -66,30 +71,20 @@ impl<'b> Kernel for PoolKernel<'b> {
     type Post =  Pool;
 
     fn validate(&self, pool: &Pool, buckets: &mut [u8]) {
-        let mut anys = self.data.anys.iter().collect::<Vec<_>>();
-        let mut alls = self.data.alls.iter().collect::<Vec<_>>();
+        struct CounterState<'a> {
+            counter: &'a Counter,
+            count: u8,
+            target_bucket: usize,
+        }
+        let mut counters = self.data.counters.iter().map(|(counter, target_bucket)| CounterState{counter, target_bucket: *target_bucket, count: 0}).collect::<Vec<_>>();
         let mut sequences = self.data.sequences.iter().map(|(steps, bucket)| (Peeker::new(steps.iter()), bucket)).collect::<Vec<_>>();
         for post in pool.iter_posts(self.post_db) {
+            for counter in counters.iter_mut() {
+                if counter.counter.query.validate(&post) {
+                    counter.count += 1;
+                }
+            }
             let mut to_evict: Vec<usize> = Vec::new();
-            for (i, (query, bucket)) in anys.iter().enumerate() {
-                if query.validate(post) {
-                    buckets[*bucket]+=1;
-                    to_evict.push(i);
-                }
-            }
-            for idx in to_evict.iter().rev() {
-                anys.swap_remove(*idx);
-            }
-            to_evict.clear();
-            for (i, (query, _)) in alls.iter().enumerate() {
-                if !query.validate(post) {
-                    to_evict.push(i);
-                }
-            }
-            for idx in to_evict.iter().rev() {
-                alls.swap_remove(*idx);
-            }
-            to_evict.clear();
             for (i, (sequence, bucket)) in sequences.iter_mut().enumerate() {
                 while sequence.peek().query.validate(post) {
                     let allow_next = sequence.peek().allow_next_step_on_same_post;
@@ -110,13 +105,18 @@ impl<'b> Kernel for PoolKernel<'b> {
             for idx in to_evict.iter().rev() {
                 sequences.swap_remove(*idx);
             }
+            /*
             if sequences.is_empty() && anys.is_empty() && alls.is_empty() {
                 return;
             }
+            */
         }
-        // increment the buckets of any surviving alls
-        for (_, bucket) in alls {
-            buckets[*bucket]+=1;
+        for counter in counters {
+            let min = counter.counter.min.unwrap_or(pool.post_ids.len() as u8);
+            let max = counter.counter.max.unwrap_or(pool.post_ids.len() as u8);
+            if counter.count >= min && counter.count <= max {
+                buckets[counter.target_bucket]+=1;
+            }
         }
     }
 }
@@ -159,8 +159,7 @@ impl<T,E> std::ops::FromResidual for PTry<T,E> {
 pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, mut query: &'a str) -> Result<NestedQuery<PoolKernel<'db>>, TreeError<&'a str>> {
     let mut nqp = NestedQueryParser::<()>::new();
 
-    let mut alls = Vec::new();
-    let mut anys = Vec::new();
+    let mut counters = Vec::new();
     let mut sequences = Vec::new();
 
     enum BracketKind {
@@ -176,8 +175,16 @@ pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, mu
         input.reset(&checkpoint);
         let (mode, square_brace_is_backslashed) = seq!(
                 alt((
-                        parse_range.map(|(start,end)|BracketKind::Single(start,end)),
                         "any".map(|_| BracketKind::Single(Some(1), None)),
+                        "all".map(|_| BracketKind::Single(None, None)),
+                        seq!(digit1.parse_to::<u8>(), opt(seq!('-', opt(digit1.parse_to::<u8>())))).map(|(start,rest)| {
+                            let end = match rest {
+                                None => None,
+                                Some((_, None)) => Some(start),
+                                Some((_, Some(x))) => Some(x),
+                            };
+                            BracketKind::Single(Some(start), end)
+                        }),
                         "".map(|_| BracketKind::Sequence),
                     )),
                 alt((
@@ -210,7 +217,10 @@ pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, mu
                }}).collect(), nqp.get_current_bucket(0)));
             },
             BracketKind::Single(start, end) => {
-                todo!()
+                let query = super::e6_posts::parse_query(&tag_db, input2).map_err(ErrMode::Cut)?;
+                counters.push((Counter {
+                    query, min: start, max: end
+                }, nqp.get_current_bucket(0)));
             },
         }
         nqp.increment_count(0, 1);
@@ -252,7 +262,7 @@ pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, mu
             nqp.finalize()
             .map_err(|e| TreeError::from_external_error(&"",ErrorKind::Eof,e))?, 
             PoolKernel {post_db, data: PoolKernelData {
-                anys, alls, sequences
+                counters, sequences
             }}))
 }
 
@@ -342,7 +352,7 @@ mod tests {
             post(6, &[3,4]),
         ]));
 
-        let validator = parse_query(&tag_db, &post_db, "[ a |> b > c > d ]").unwrap();
+        let validator = parse_query(&tag_db, &post_db, "[a |> b > c > d]").unwrap();
 
         assert!(validator.validate(&Pool::debug_default([1,2,4,5])));
         assert!(validator.validate(&Pool::debug_default([1,2,1,4,5])));
