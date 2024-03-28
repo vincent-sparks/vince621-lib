@@ -5,11 +5,12 @@ mod util;
 
 use std::io::{Read,BufRead};
 
-use vince621_core::db::{posts::PostDatabase, tags::TagDatabase};
+use vince621_core::db::{pools::PoolDatabase, posts::PostDatabase, tags::TagDatabase};
 
 pub struct E6Database {
     pub tag: TagDatabase,
     pub post: PostDatabase,
+    pub pool: PoolDatabase,
 }
 
 /// The first argument to the download callback is a URL, which is guaranteed to begin with
@@ -33,7 +34,7 @@ pub struct E6Database {
 /// page from which the date of the most recent DB export is parsed.  To avoid this first call, you
 /// may call [load_date] instead.
 ///
-pub fn load<R: BufRead>(download_callback: impl Fn(String, &'static str) -> std::io::Result<R>) -> csv::Result<E6Database> {
+pub fn load<R: BufRead>(download_callback: impl Fn(String, &'static str) -> std::io::Result<R> + Sync) -> csv::Result<E6Database> {
     let mut response = Vec::new();
     download_callback("https://e621.net/db_export/".into(), "text/html")?.read_to_end(&mut response)?;
     let mut data = std::str::from_utf8(response.as_slice()).map_err(std::io::Error::other)?;
@@ -55,7 +56,8 @@ pub fn load<R: BufRead>(download_callback: impl Fn(String, &'static str) -> std:
 
 /// Load the database as it appeared on the specified date, which must be YYYY-MM-DD format.  If the
 /// download_callback performs an actual HTTP request, this date may be up to two days in the past.
-pub fn load_date<R: BufRead>(date: &str, download_callback: impl Fn(String, &'static str) -> std::io::Result<R>) -> csv::Result<E6Database> {
+pub fn load_date<R: BufRead>(date: &str, download_callback: impl Fn(String, &'static str) -> std::io::Result<R> + Sync) -> csv::Result<E6Database> {
+    let (tag_and_post, pool_db) = rayon::join( || {
     let tag_csvgz = download_callback(format!("https://e621.net/db_export/tags-{}.csv.gz", date), "application/octet-stream")?;
 
     let tag_db = tags::load_tag_database(csv::Reader::from_reader(flate2::bufread::GzDecoder::new(tag_csvgz)))?;
@@ -63,9 +65,23 @@ pub fn load_date<R: BufRead>(date: &str, download_callback: impl Fn(String, &'st
     let post_csvgz = download_callback(format!("https://e621.net/db_export/posts-{}.csv.gz", date), "application/octet-stream")?;
 
     let post_db = posts::load_post_database(&tag_db, csv::Reader::from_reader(flate2::bufread::GzDecoder::new(post_csvgz)))?;
+    std::io::Result::Ok((tag_db, post_db))
+    },
+    || {
+    let pool_csvgz = download_callback(format!("https://e621.net/db_export/pools-{}.csv.gz", date), "application/octet-stream")?;
+
+    let pool_db = pools::load_pool_database(csv::Reader::from_reader(flate2::bufread::GzDecoder::new(pool_csvgz)))?;
+
+    std::io::Result::Ok(pool_db)
+    }
+    );
+
+    let (tag_db, post_db) = tag_and_post?;
+    let pool_db = pool_db?;
     
     Ok(E6Database {
         tag: tag_db,
         post: post_db,
+        pool: pool_db,
     })
 }

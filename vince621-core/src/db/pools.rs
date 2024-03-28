@@ -49,7 +49,8 @@ impl<'pool, 'db> Iterator for PoolPostsIter<'pool, 'db> {
 
     fn next(&mut self) -> Option<&'db Post> {
         let id = *self.post_ids.next()?;
-        let (idx, post) = if self.last_post_id < id.get() {
+        let Some((idx, post)) = 
+        (if self.last_post_id < id.get() {
             let remaining_posts = &self.db[self.last_idx..];
             let increment_option = if id.get() < self.last_post_id + 10 {
                 // optimization: most pools contain posts with IDs that are either sequential or close to
@@ -75,7 +76,10 @@ impl<'pool, 'db> Iterator for PoolPostsIter<'pool, 'db> {
         } else {
             // if all else fails, fall back to a full binary search.
             self.db.binary_search_by(|post| post.id.cmp(&id)).ok().map(|idx| (idx, &self.db[idx]))
-        }.unwrap_or_else(|| panic!("Pool {} contains a post {} not in the post database", self.pool_id, id));
+        }) else {
+            // post was not in the database.  skip it and loop back to the top by tail recursing.
+            return self.next();
+        };
         debug_assert!(std::ptr::eq(post, &self.db[idx]));
         debug_assert!(post.id == id);
         self.last_post_id = id.get();

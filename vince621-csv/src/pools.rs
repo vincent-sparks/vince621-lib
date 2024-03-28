@@ -33,14 +33,14 @@ struct CSVPool {
     id: NonZeroU32,
     name: Box<str>,
     description: Box<str>,
-    #[serde(deserialize_with="crate::util::rfc3339")]
+    #[serde(deserialize_with="crate::util::e621_date")]
     updated_at: PrimitiveDateTime,
 
     #[serde(deserialize_with="category")]
     category: PoolCategory,
 
     #[serde(deserialize_with="crate::util::t_or_f")]
-    active: bool,
+    is_active: bool,
     #[serde(deserialize_with="crate::util::bracketed_list")]
     post_ids: Box<[NonZeroU32]>,
 }
@@ -51,7 +51,7 @@ impl From<CSVPool> for Pool {
             id: me.id,
             name: me.name,
             description: if !me.description.is_empty() {Some(me.description)} else {None},
-            is_active: me.active,
+            is_active: me.is_active,
             last_updated: me.updated_at,
             category: me.category,
             post_ids: me.post_ids,
@@ -61,4 +61,9 @@ impl From<CSVPool> for Pool {
 
 pub fn load_pool_database<R: std::io::Read>(mut csv: csv::Reader<R>) -> csv::Result<PoolDatabase> {
     csv.deserialize::<CSVPool>().map(|r| r.map(Into::into)).collect::<Result<_,_>>().map(PoolDatabase::new)
+}
+
+#[test]
+fn load_csv() {
+    load_pool_database(csv::Reader::from_reader(flate2::read::GzDecoder::new(std::fs::File::open("pools.csv.gz").unwrap()))).unwrap();
 }
