@@ -20,8 +20,8 @@ impl FromStr for Rating {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "s" | "safe" => Ok(Rating::Safe),
-            "q" | "questionable" => Ok(Rating::Safe),
-            "e" | "epxlicit" => Ok(Rating::Safe),
+            "q" | "questionable" => Ok(Rating::Questionable),
+            "e" | "explicit" => Ok(Rating::Explicit),
             _ => Err(BadRating),
         }
     }
@@ -98,4 +98,12 @@ impl PostDatabase {
     pub fn get_all(&self) -> &[Post] {
         &self.posts
     }
+}
+
+#[cfg(test)]
+#[test]
+fn test_parser() {
+    use serde::Deserialize;
+    assert_eq!("questionable".parse::<Rating>().unwrap_or_else(|_| panic!()), Rating::Questionable);
+    assert_eq!(Rating::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new("explicit")).unwrap(), Rating::Explicit);
 }
