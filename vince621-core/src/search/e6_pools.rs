@@ -1,14 +1,12 @@
-use std::borrow::Cow;
-
-use winnow::ascii::{digit1, space0, space1};
+use winnow::ascii::{digit1, space0};
 use winnow::combinator::{alt, eof, opt, repeat, repeat_till, seq};
-use winnow::error::{ErrMode, ErrorKind, FromExternalError, ParseError, ParserError, StrContext, TreeError};
+use winnow::error::{ErrMode, ErrorKind, FromExternalError, ParserError, StrContext, TreeError};
 use winnow::stream::Stream as _;
-use winnow::token::{take_till, take_until};
+use winnow::token::take_until;
 use winnow::{PResult, Parser};
 
 use crate::db::pools::Pool;
-use crate::db::posts::{Post, PostDatabase};
+use crate::db::posts::PostDatabase;
 use crate::db::tags::TagDatabase;
 
 use super::{Kernel, NestedQuery, NestedQueryParser};
@@ -328,7 +326,7 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
-    use crate::db::tags::{Tag, TagDatabase};
+    use crate::db::{posts::Post, tags::{Tag, TagDatabase}};
 
     #[test]
     fn test_parse_single() {
