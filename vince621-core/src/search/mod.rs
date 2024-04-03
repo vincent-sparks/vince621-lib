@@ -60,17 +60,17 @@ pub struct NestedQueryParser<Data=()> {
 
 #[derive(Debug,PartialEq)]
 pub struct NestedQuery<K> {
-    buckets: Vec<Bucket>,
-    predicate: K,
+    pub(crate) buckets: Vec<Bucket>,
+    pub(crate) kernel: K,
 }
 
 impl<K> NestedQuery<K> where K: Kernel {
-    pub fn new(buckets: Vec<Bucket>, predicate: K) -> Self {
-        Self{buckets,predicate}
+    pub fn new(buckets: Vec<Bucket>, kernel: K) -> Self {
+        Self{buckets,kernel}
     }
     pub fn validate(&self, post: &K::Post) -> bool {
         let mut buckets = unsafe {Box::new_zeroed_slice(self.buckets.len()).assume_init()};
-        self.predicate.validate(post, &mut buckets);
+        self.kernel.validate(post, &mut buckets);
         for (idx, bucket) in self.buckets.iter().enumerate().rev() {
             // don't work on the root bucket.
             if idx==0 {break;}
@@ -82,8 +82,8 @@ impl<K> NestedQuery<K> where K: Kernel {
         buckets[0] >= self.buckets[0].min && buckets[0] <= self.buckets[0].max
     }
     pub fn into_inner(self) -> (Vec<Bucket>, K) {
-        let Self{buckets,predicate} = self;
-        (buckets,predicate)
+        let Self{buckets,kernel} = self;
+        (buckets,kernel)
     }
 }
 
