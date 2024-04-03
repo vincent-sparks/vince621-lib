@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use winnow::ascii::{digit1, space0, space1};
 use winnow::combinator::{alt, eof, opt, repeat, repeat_till, seq};
-use winnow::error::{ErrMode, ErrorKind, FromExternalError, ParseError, ParserError, TreeError};
+use winnow::error::{ErrMode, ErrorKind, FromExternalError, ParseError, ParserError, StrContext, TreeError};
 use winnow::stream::Stream as _;
 use winnow::token::{take_till, take_until};
 use winnow::{PResult, Parser};
@@ -20,11 +20,28 @@ struct SequenceStep {
     allow_next_step_on_same_post: bool,
 }
 
+#[derive(Debug,Clone,Copy,Eq,PartialEq)]
+enum CounterBound {
+    Absolute(usize),
+    Percentage(u8),
+    All,
+}
+
+impl CounterBound {
+    fn resolve(&self, length: usize) -> usize {
+        match *self {
+            Self::Absolute(val) => val,
+            Self::Percentage(val) => {val as usize * length / 100},
+            Self::All => length,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Counter {
     query: NestedQuery<PostKernel>,
-    min: Option<u8>,
-    max: Option<u8>,
+    min: CounterBound,
+    max: CounterBound,
 }
 
 #[derive(Debug)]
@@ -73,7 +90,7 @@ impl<'b> Kernel for PoolKernel<'b> {
     fn validate(&self, pool: &Pool, buckets: &mut [u8]) {
         struct CounterState<'a> {
             counter: &'a Counter,
-            count: u8,
+            count: usize,
             target_bucket: usize,
         }
         let mut counters = self.data.counters.iter().map(|(counter, target_bucket)| CounterState{counter, target_bucket: *target_bucket, count: 0}).collect::<Vec<_>>();
@@ -112,8 +129,8 @@ impl<'b> Kernel for PoolKernel<'b> {
             */
         }
         for counter in counters {
-            let min = counter.counter.min.unwrap_or(pool.post_ids.len() as u8);
-            let max = counter.counter.max.unwrap_or(pool.post_ids.len() as u8);
+            let min = counter.counter.min.resolve(pool.post_ids.len());
+            let max = counter.counter.max.resolve(pool.post_ids.len());
             if counter.count >= min && counter.count <= max {
                 buckets[counter.target_bucket]+=1;
             }
@@ -156,7 +173,18 @@ impl<T,E> std::ops::FromResidual for PTry<T,E> {
     }
 }
 
-pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, mut query: &'a str) -> Result<NestedQuery<PoolKernel<'db>>, TreeError<&'a str>> {
+fn parse_counter_bound<'a, E>(input: &mut &'a str) -> PResult<CounterBound, E> where E: ParserError<&'a str> {
+    let num = digit1.parse_to::<usize>().parse_next(&mut *input)?;
+    if input.starts_with('%') {
+        // tried using opt(...)?.is_some() here and it didn't work
+        *input=&input[1..];
+        Ok(CounterBound::Percentage(num as u8))
+    } else {
+        Ok(CounterBound::Absolute(num))
+    }
+}
+
+pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, query: &'a str) -> Result<NestedQuery<PoolKernel<'db>>, TreeError<&'a str>> {
     let mut nqp = NestedQueryParser::<()>::new();
 
     let mut counters = Vec::new();
@@ -164,7 +192,7 @@ pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, mu
 
     enum BracketKind {
         Sequence,
-        Single(Option<u8>, Option<u8>)
+        Single(CounterBound, CounterBound)
     }
 
     repeat(1.., |input: &mut &'a str| {
@@ -175,15 +203,15 @@ pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, mu
         input.reset(&checkpoint);
         let (mode, square_brace_is_backslashed) = seq!(
                 alt((
-                        "any".map(|_| BracketKind::Single(Some(1), None)),
-                        "all".map(|_| BracketKind::Single(None, None)),
-                        seq!(digit1.parse_to::<u8>(), opt(seq!('-', opt(digit1.parse_to::<u8>())))).map(|(start,rest)| {
+                        "any".map(|_| BracketKind::Single(CounterBound::Absolute(1), CounterBound::All)),
+                        "all".map(|_| BracketKind::Single(CounterBound::All, CounterBound::All)),
+                        seq!(parse_counter_bound.context(StrContext::Label("lower bound")), opt(seq!('-', opt(parse_counter_bound).context(StrContext::Label("upper bound")))).context(StrContext::Label("opt"))).map(|(start,rest)| {
                             let end = match rest {
-                                None => None,
-                                Some((_, None)) => Some(start),
-                                Some((_, Some(x))) => Some(x),
+                                None => start,
+                                Some((_, None)) => CounterBound::All,
+                                Some((_, Some(x))) => x,
                             };
-                            BracketKind::Single(Some(start), end)
+                            BracketKind::Single(start, end)
                         }),
                         "".map(|_| BracketKind::Sequence),
                     )),
@@ -195,7 +223,7 @@ pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, mu
         
         space0.parse_next(&mut *input)?;
         
-        let input2 = take_until(1.., if square_brace_is_backslashed {"\\]"} else {"]"}).parse_next(&mut *input)?;
+        let input2 = take_until(0.., if square_brace_is_backslashed {"\\]"} else {"]"}).parse_next(&mut *input)?;
 
         if square_brace_is_backslashed {
             *input = &input[2..];
@@ -224,6 +252,7 @@ pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, mu
             },
         }
         nqp.increment_count(0, 1);
+        space0.parse_next(&mut *input)?;
         Ok(())
     }
     ).parse(query).map_err(|e|e.into_inner())?;
@@ -274,7 +303,7 @@ enum Terminator {
     Eof,
 }
 
-fn parse_single<'a, E>(db: &TagDatabase, query: &mut &'a str) -> PResult<(NestedQuery<PostKernel>, Terminator), E> where E: ParserError<&'a str> + FromExternalError<&'a str, super::ParseError> + FromExternalError<&'a str, super::e6_posts::UnknownTag>{
+fn parse_single<'a, E>(db: &TagDatabase, query: &mut &'a str) -> PResult<(NestedQuery<PostKernel>, Terminator), E> where E: ParserError<&'a str> + FromExternalError<&'a str, super::ParseError> + FromExternalError<&'a str, super::e6_posts::BadTag>{
     let mut parser = TagQueryParser::new(db);
     let parser_ref = &mut parser;
 
@@ -324,6 +353,12 @@ mod tests {
         assert_eq!(cursor.trim(), "e f");
         let (parsed, terminator) = parse_single::<TreeError<_>>(&db, cursor).unwrap();
         assert_eq!(terminator, Terminator::Eof);
+    }
+
+    #[test]
+    fn test_parse_counter_bound() {
+        assert_eq!(parse_counter_bound::<ErrorKind>.parse("80").unwrap(), CounterBound::Absolute(80));
+        assert_eq!(parse_counter_bound::<ErrorKind>.parse("80%").unwrap(), CounterBound::Percentage(80));
     }
 
     fn post(id: u32, tags: &[u32]) -> Post {
@@ -384,6 +419,12 @@ mod tests {
         assert!(validator.validate(&Pool::debug_default([2,2,1,2,1,2,2])));
         assert!(!validator.validate(&Pool::debug_default([2,2,1,2,1,2,2,1,1])));
         assert!(validator.validate(&Pool::debug_default([2,2,1,2,3,2,2])));
+
+        let validator = parse_query(&tag_db, &post_db, "50%-[ a ]").unwrap();
+
+        assert!(validator.validate(&Pool::debug_default([2,2,1,2,1,1])));
+        assert!(!validator.validate(&Pool::debug_default([2,2,1,2,2,1])));
+        assert!(validator.validate(&Pool::debug_default([1,1,1])));
     }
 
 }
