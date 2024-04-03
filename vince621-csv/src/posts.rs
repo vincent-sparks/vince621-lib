@@ -13,6 +13,8 @@ struct CSVPost {
     file_ext: FileExtension,
     #[serde(deserialize_with="hex::serde::deserialize")]
     md5: [u8;16],
+    #[serde(deserialize_with="crate::util::t_or_f")]
+    is_deleted: bool,
 }
 
 pub fn load_post_database<R: Read>(tag_db: &TagDatabase, mut rdr: csv::Reader<R>) -> csv::Result<PostDatabase> {
@@ -27,6 +29,7 @@ pub fn load_post_database<R: Read>(tag_db: &TagDatabase, mut rdr: csv::Reader<R>
     let mut row = csv::StringRecord::new();
     while rdr.read_record(&mut row)? {
         let post: CSVPost = row.deserialize(Some(&headers))?;
+        if post.is_deleted {continue;}
         let tag_string = row.get(tag_string_idx).unwrap();
         let mut tags: Vec<u32> = Vec::new();
         for tag in tag_string.split(' ') {
