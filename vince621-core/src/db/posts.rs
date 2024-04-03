@@ -64,6 +64,7 @@ pub struct Post {
 }
 
 impl Post {
+    #[allow(unused)]
     pub(crate) fn debug_default() -> Self {
         Self {
             id: unsafe {NonZeroU32::new_unchecked(u32::MAX)},

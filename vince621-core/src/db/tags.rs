@@ -58,7 +58,7 @@ impl<'de> serde::Deserialize<'de> for TagCategory {
 }
 
 #[repr(u8)]
-#[derive(strum::EnumString, num_derive::FromPrimitive, serde::Serialize, Debug)]
+#[derive(strum::EnumString, num_derive::FromPrimitive, serde::Serialize, Debug, Clone, Copy)]
 pub enum TagCategory {
     General=0,
     Artist=1,
@@ -128,6 +128,25 @@ impl TagDatabase {
             #[cfg(feature="phf")] map,
         }
     }
+
+    /**
+     * This method only exists for use by the serialization machinery.  You should not use it
+     * directly.
+     */
+    #[cfg(feature="phf")]
+    pub fn from_phf(tags: Box<[Tag]>, map: phf_generator::HashState) -> Self {
+        Self {tags, map}
+    }
+
+    /**
+     * This method only exists for use by the serialization machinery.  You should not use it
+     * directly.
+     */
+    #[cfg(feature="phf")]
+    pub fn get_phf(&self) -> &phf_generator::HashState {
+        &self.map
+    }
+
     pub fn get_all(&self) -> &[Tag] {
         &self.tags
     }

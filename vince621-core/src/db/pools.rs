@@ -20,9 +20,10 @@ pub struct Pool {
 
 impl Pool {
     pub fn iter_posts<'s, 'a>(&'s self, post_db: &'a PostDatabase) -> PoolPostsIter<'s, 'a> {
-        PoolPostsIter {db: post_db.get_all(), post_ids: self.post_ids.iter(), last_post_id: 0, last_idx: 0, pool_id: self.id}
+        PoolPostsIter {db: post_db.get_all(), post_ids: self.post_ids.iter(), last_post_id: 0, last_idx: 0}
     }
 
+    #[allow(unused)]
     pub(crate) fn debug_default(post_ids: impl IntoIterator<Item=u32>) -> Pool {
         Pool {
             id: unsafe {NonZeroU32::new_unchecked(1)},
@@ -41,7 +42,6 @@ pub struct PoolPostsIter<'pool, 'db> {
     post_ids: std::slice::Iter<'pool, NonZeroU32>,
     last_post_id: u32,
     last_idx: usize,
-    pool_id: NonZeroU32,
 }
 
 impl<'pool, 'db> Iterator for PoolPostsIter<'pool, 'db> {
@@ -130,13 +130,12 @@ mod tests {
             post_with_id(20),
             post_with_id(50),
         ];
-        let post_ids: Vec<NonZeroU32> = vec![1u32,2,2,20,50,3].into_iter().filter_map(NonZeroU32::new).collect();
+        let post_ids: Vec<NonZeroU32> = vec![1u32,2,2,20,9999,50,3].into_iter().filter_map(NonZeroU32::new).collect();
         let res: Vec<&Post> = PoolPostsIter {
             db: posts,
             last_idx: 0,
             last_post_id: 0,
             post_ids: post_ids.iter(),
-            pool_id: unsafe {NonZeroU32::new_unchecked(1)},
         }.collect();
         assert_eq!(res, vec![&posts[0], &posts[1], &posts[1], &posts[3], &posts[4], &posts[2]]);
     }
