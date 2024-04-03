@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::num::NonZeroU8;
+use std::str::FromStr;
 
 use winnow::ascii::space0;
 use winnow::combinator::{repeat, alt, seq};
@@ -13,6 +14,7 @@ use winnow::error::ParserError;
 use winnow::Parser;
 use winnow::prelude::*;
 
+use crate::db::posts::{self, Post, Rating};
 use crate::db::tags::TagDatabase;
 
 use super::{NestedQueryParser, Kernel};
@@ -33,11 +35,13 @@ struct StackFrameData {
 #[derive(Debug)]
 pub struct PostKernel {
     tags: Box<[Tag]>,
+    ratings: [Vec<usize>; 3],
 }
 
 pub(crate) struct TagQueryParser<'a> {
     db: &'a TagDatabase,
     tags: Vec<Tag>,
+    ratings: [Vec<usize>; 3],
     nested_query: NestedQueryParser<StackFrameData>,
 }
 impl<'a> TagQueryParser<'a> {
@@ -46,30 +50,131 @@ impl<'a> TagQueryParser<'a> {
             db,
             tags: Vec::new(),
             nested_query: NestedQueryParser::new(),
+            ratings: [Vec::new(), Vec::new(), Vec::new()],
         }
     }
 
     pub fn finalize(mut self) -> Result<NestedQuery<PostKernel>, super::ParseError> {
         let buckets = self.nested_query.finalize()?;
         self.tags.sort_unstable_by_key(|tag| tag.tag_id);
-        Ok(NestedQuery::new(buckets, PostKernel{tags: self.tags.into_boxed_slice()}))
+        Ok(NestedQuery::new(buckets, PostKernel{tags: self.tags.into_boxed_slice(), ratings: self.ratings}))
     }
 }
 
 #[derive(Debug)]
-pub struct UnknownTag(String);
+pub enum BadTag {
+    UnknownTag(String),
+    BadRating,
+}
 
-impl std::fmt::Display for UnknownTag {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the tag \"")?;
-        f.write_str(self.0.as_str())?;
-        f.write_str("\" did not match any tag in the e621 database")
+#[derive(Debug,PartialEq)]
+pub enum SortOrder {
+    Date,
+    DateAscending,
+    Score,
+    ScoreAscending,
+    FavCount,
+    FavCountAscending,
+    Random,
+}
+
+impl SortOrder {
+    pub fn sort(&self, results: &mut [posts::Post]) {
+        match self {
+            Self::DateAscending => {
+                // list is already sorted by date ascending -- we're done here.
+            },
+            Self::Date => {
+                results.reverse();
+            },
+            Self::Random => {
+                todo!()
+            },
+            other => {
+                results.sort_unstable_by(match other {
+                    Self::ScoreAscending => |a:&Post,b:&Post| a.score.cmp(&b.score),
+                    Self::Score => |a:&Post,b:&Post| b.score.cmp(&a.score),
+                    Self::FavCount => |a:&Post,b:&Post| a.fav_count.cmp(&b.fav_count),
+                    Self::FavCountAscending => |a:&Post,b:&Post| b.fav_count.cmp(&a.fav_count),
+                    Self::Date | Self::DateAscending | Self::Random => unreachable!(),
+                });
+            }
+        }
     }
 }
 
-impl std::error::Error for UnknownTag {}
+#[derive(thiserror::Error,Debug)]
+pub enum BadSortOrder {
+    #[error("Unknown sort order")]
+    UnknownSortOrder,
+    #[error("Sort order was specified twice")]
+    DuplicateSortOrder,
+}
 
-impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, UnknownTag> + FromExternalError<&'a str, super::ParseError>> Parser<&'a str, (), E> for TagQueryParser<'db> {
+impl FromStr for SortOrder {
+    type Err=BadSortOrder;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "id_desc" => Ok(Self::Date),
+            "id" | "id_asc" => Ok(Self::DateAscending),
+            "score" => Ok(Self::Score),
+            "score_asc" => Ok(Self::ScoreAscending),
+            "favcount" => Ok(Self::FavCount),
+            "favcount_asc" => Ok(Self::FavCountAscending),
+            "random" => Ok(Self::Random),
+            _ => Err(BadSortOrder::UnknownSortOrder),
+        }
+    }
+}
+
+pub struct SortOrderParser(Option<SortOrder>);
+impl SortOrderParser {
+    fn new() -> Self {
+        Self(None)
+    }
+    fn finalize(self) -> SortOrder {
+        self.0.unwrap_or(SortOrder::Date)
+    }
+}
+
+impl<'a, E> Parser<&'a str, (), E> for SortOrderParser where E: ParserError<&'a str> + FromExternalError<&'a str, BadSortOrder> {
+    fn parse_next(&mut self, input: &mut &'a str) -> PResult<(), E> {
+        if self.0.is_some() && input.starts_with("order:") {
+            return Err(ErrMode::Cut(E::from_external_error(input, ErrorKind::Verify, BadSortOrder::DuplicateSortOrder)));
+        }
+        "order:".parse_next(input)?;
+        let cp = input.checkpoint();
+        let token = take_till(1.., |c: char| c.is_whitespace()||c=='}').parse_next(input)?;
+        match token.parse::<SortOrder>() {
+            Ok(o) => {
+                self.0 = Some(o);
+                Ok(())
+            },
+            Err(e) => {
+                input.reset(&cp);
+                Err(ErrMode::Cut(E::from_external_error(input, ErrorKind::Verify, e)))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for BadTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownTag(t) => {
+                f.write_str("the tag \"")?;
+                f.write_str(t.as_str())?;
+                f.write_str("\" did not match any tag in the e621 database")
+            }
+            Self::BadRating => f.write_str("Rating must be \"safe\", \"questionable\", or \"explicit\" (you may abbreviate these to the first letter)")
+        }
+    }
+}
+
+impl std::error::Error for BadTag {}
+
+impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + FromExternalError<&'a str, super::ParseError>> Parser<&'a str, (), E> for TagQueryParser<'db> {
     fn parse_next(&mut self, input: &mut &'a str) -> PResult<(), E> {
         let checkpoint = input.checkpoint();
         match self.nested_query.parse_next(input) {
@@ -150,6 +255,19 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, UnknownTag> +
                 } else {
                     0
                 };
+                if token.starts_with("rating:") {
+                    match token[7..].parse::<Rating>() {
+                        Ok(rating) => {
+                            self.ratings[rating as usize].push(self.nested_query.get_current_bucket(slot));
+                            self.nested_query.increment_count(slot,1);
+                            return Ok(());
+                        },
+                        Err(_) => {
+                            input.reset(&checkpoint);
+                            return Err(ErrMode::Cut(E::from_external_error(input, ErrorKind::Slice, BadTag::BadRating))); // FIXME
+                        }
+                    }
+                }
                 for tag in self.db.search_wildcard(token) {
                     found_any = true;
                     self.tags.push(Tag {tag_id: tag.id, bucket: self.nested_query.get_current_bucket(slot)});
@@ -161,7 +279,7 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, UnknownTag> +
                     // the caller should reset to some suitable point for us, but we need to point to the
                     // error location for better error reporting.
                     input.reset(&checkpoint);
-                    Err(ErrMode::Backtrack(E::from_external_error(input, ErrorKind::Slice, UnknownTag(token.to_owned()))))
+                    Err(ErrMode::Backtrack(E::from_external_error(input, ErrorKind::Verify, BadTag::UnknownTag(token.to_owned()))))
                 }
             }
         }
@@ -169,9 +287,13 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, UnknownTag> +
 }
 
 impl Kernel for PostKernel {
-    type Post = crate::db::posts::Post;
+    type Post = posts::Post;
 
     fn validate(&self, post: &Self::Post, buckets: &mut [u8]) {
+        for item in self.ratings[post.rating as usize].iter() {
+            buckets[*item] += 1;
+        }
+
         let mut post_tags = post.tags.iter().copied();
         let mut query_tags = self.tags.iter();
         let mut cur_query_tag_opt = query_tags.next();
@@ -197,13 +319,30 @@ impl Kernel for PostKernel {
 pub fn parse_query<'a>(db: &TagDatabase, query: &'a str) -> Result<NestedQuery<PostKernel>, TreeError<&'a str>> {
     let mut tag_parser = TagQueryParser::new(db);
     let tag_parser_ref = &mut tag_parser;
-    repeat(1..,
+    repeat(0..,
            seq!(
                |input: &mut &'a str| tag_parser_ref.parse_next(input),
                space0,
                )
       ).parse(query).map_err(|e| e.into_inner())?;
     tag_parser.finalize().map_err(|e| TreeError::from_external_error(&"", ErrorKind::Eof, e))
+}
+
+pub fn parse_query_and_sort_order<'a>(db: &TagDatabase, query: &'a str) -> Result<(NestedQuery<PostKernel>, SortOrder), ContextError<&'a str>> {
+    let mut tag_parser = TagQueryParser::new(db);
+    let mut sort_order_parser = SortOrderParser::new();
+    let tag_parser_ref = &mut tag_parser;
+    let sort_order_parser_ref = &mut sort_order_parser;
+    repeat(0..,
+           seq!(
+               alt((
+                   |input: &mut &'a str| sort_order_parser_ref.parse_next(input),
+                   |input: &mut &'a str| tag_parser_ref.parse_next(input),
+               )),
+               space0,
+               )
+      ).parse(query).map_err(|e| e.into_inner())?;
+    tag_parser.finalize().map_err(|e| ContextError::from_external_error(&"", ErrorKind::Eof, e)).map(|q| (q, sort_order_parser.finalize()))
 }
 
 #[cfg(test)]
@@ -246,5 +385,31 @@ mod test {
         assert_eq!(a, [1,1]);
         let validator = NestedQuery::new(buckets, validator);
         assert!(!validator.validate(&post));
+    }
+
+    #[test]
+    fn test_sort_order() {
+        let mut sort_order_parser = SortOrderParser::new();
+        let e: PResult<_, ContextError> = sort_order_parser.parse_peek("abcde");
+        assert!(matches!(e.unwrap_err(), ErrMode::Backtrack(_)));
+        let e: PResult<_, ContextError> = sort_order_parser.parse_peek("order:score ");
+        assert_eq!(e.unwrap(), (" ",()));
+        assert_eq!(sort_order_parser.finalize(), SortOrder::Score);
+
+        let tag_db = TagDatabase::new([
+            Tag::new_debug("a", 1),
+            Tag::new_debug("b", 2),
+            Tag::new_debug("c", 3),
+            Tag::new_debug("order:favcount_asc", 4),
+        ].into());
+
+        let res = parse_query_and_sort_order(&tag_db, "a b c").unwrap();
+        assert_eq!(res.0.kernel.tags.iter().map(|x|x.tag_id).collect::<Vec<_>>(), vec![1,2,3]);
+        assert_eq!(res.1, SortOrder::Date);
+
+        let res = parse_query_and_sort_order(&tag_db, "a b order:favcount_asc c").unwrap();
+        dbg!(&res.0);
+        assert_eq!(res.0.kernel.tags.iter().map(|x|x.tag_id).collect::<Vec<_>>(), vec![1,2,3]);
+        assert_eq!(res.1, SortOrder::FavCountAscending);
     }
 }
