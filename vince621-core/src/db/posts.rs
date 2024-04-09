@@ -1,8 +1,6 @@
-use std::{num::NonZeroU32, str::FromStr};
+use std::{num::{NonZeroU16, NonZeroU32}, str::FromStr};
 
 use hex::ToHex;
-
-
 
 #[derive(Debug, serde::Serialize,serde::Deserialize, strum::Display,Clone,Copy, num_derive::FromPrimitive,Eq,PartialEq)]
 #[serde(rename_all="lowercase")]
@@ -61,6 +59,18 @@ pub struct Post {
     pub file_ext: FileExtension,
     pub tags: Box<[u32]>,
     pub parent_id: Option<NonZeroU32>,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Debug,PartialEq,Eq)]
+pub enum ImageResolution {
+    /// 150px Thumbnail
+    Preview,
+    /// 800px Low-res
+    Sample,
+    /// Full image
+    Full,
 }
 
 impl Post {
@@ -76,10 +86,49 @@ impl Post {
             file_ext: FileExtension::PNG,
             tags: Box::from([]),
             parent_id: None,
+            width: 640,
+            height: 480,
         }
     }
-    pub fn url(&self) -> String {
-        format!("https://static1.e621.net/data/{:02x}/{:02x}/{}.{}", self.md5[0],self.md5[1], self.md5.encode_hex::<String>(), self.file_ext)
+    pub fn has_sample(&self) -> bool {
+        //  ported from e621 has_large? function (e621ng/app/models/post.rb:252)
+        if self.file_ext == FileExtension::WEBM || self.file_ext == FileExtension::GIF || self.file_ext == FileExtension::SWF {
+            return false;
+        }
+        let mut res = self.width >= 850;
+        if self.file_ext == FileExtension::PNG {
+            // tag 194541 is "animated_png".  e621ng will not thumbnail posts with this tag.
+            res &= self.tags.binary_search(&194541).is_ok();
+        }
+        res
+    }
+    pub fn has_preview(&self) -> bool {
+        self.file_ext != FileExtension::SWF
+    }
+    pub fn url_and_extension(&self, mut res: ImageResolution) -> (String, FileExtension) {
+
+        if (res==ImageResolution::Preview && !self.has_preview()) || (res==ImageResolution::Sample && !self.has_sample()) {
+            res = ImageResolution::Full;
+        }
+
+        let ext = if res==ImageResolution::Full {self.file_ext} else {FileExtension::JPG};
+
+        (format!("https://static1.e621.net/data/{}{:02x}/{:02x}/{}.{}",
+                match res {
+                    ImageResolution::Preview => "preview/",
+                    ImageResolution::Sample => "sample/",
+                    ImageResolution::Full => "",
+                },
+                self.md5[0],
+                self.md5[1],
+                self.md5.encode_hex::<String>(),
+                ext
+                ),
+            ext)
+    }
+
+    pub fn url(&self, res: ImageResolution) -> String {
+        self.url_and_extension(res).0
     }
 }
 

@@ -1,5 +1,4 @@
-use std::io::{self, Seek};
-use std::{collections::HashMap, io::Write};
+use std::io::{self,Write};
 
 use brotli::enc::backward_references::BrotliEncoderMode;
 use brotli::CompressorWriter;

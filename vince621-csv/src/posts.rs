@@ -1,6 +1,30 @@
-use std::{io::Read, num::NonZeroU32};
+use std::{io::Read, num::{NonZeroU16, NonZeroU32}};
 
 use vince621_core::db::{posts::{FileExtension, Post, PostDatabase, Rating}, tags::TagDatabase};
+
+
+/// Some of the posts in the e621 database, speicifically a handful of flash files,
+/// have negative resolutions.
+/// I've remarked several times in the comments in this codebase that the e621 database is not
+/// very well maintained, but that one really takes the cake.  Especially since I wasn't aware
+/// Flash files even *had* a resolution.  (Maybe that's why.)
+fn skip_if_negative<'d, D:serde::de::Deserializer<'d>>(d:D) ->Result<u16,D::Error> {
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value=u16;
+        fn expecting(&self,fmt:&mut std::fmt::Formatter)->std::fmt::Result{
+            fmt.write_str("a possibly-negative u16")
+        }
+        fn visit_str<E: serde::de::Error>(self, s:&str)->Result<u16,E> {
+            if s.starts_with('-') {
+                Ok(0)
+            } else {
+                s.parse().map_err(E::custom)
+            }
+        }
+    }
+    d.deserialize_str(Visitor)
+}
 
 #[derive(serde::Deserialize)]
 struct CSVPost {
@@ -15,6 +39,11 @@ struct CSVPost {
     md5: [u8;16],
     #[serde(deserialize_with="crate::util::t_or_f")]
     is_deleted: bool,
+
+    #[serde(deserialize_with="skip_if_negative")]
+    image_width: u16,
+    #[serde(deserialize_with="skip_if_negative")]
+    image_height: u16,
 }
 
 pub fn load_post_database<R: Read>(tag_db: &TagDatabase, mut rdr: csv::Reader<R>) -> csv::Result<PostDatabase> {
@@ -48,6 +77,8 @@ pub fn load_post_database<R: Read>(tag_db: &TagDatabase, mut rdr: csv::Reader<R>
             file_ext: post.file_ext,
             md5: post.md5,
             tags: tags.into(),
+            height: post.image_height,
+            width: post.image_width,
         });
     }
     dbg!(post_parse_start.elapsed());

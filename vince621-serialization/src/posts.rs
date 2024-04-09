@@ -1,11 +1,9 @@
-use std::num::NonZeroU32;
+use std::num::{NonZeroU16, NonZeroU32};
 
 use num_traits::FromPrimitive as _;
 use varint_rs::{VarintReader,VarintWriter};
 
 use vince621_core::db::{posts::{FileExtension, Post, PostDatabase, Rating}, tags::TagDatabase};
-
-pub mod strings;
 
 fn serialize_tag_list<T: VarintWriter>(tags: &[u32], out: &mut T) -> Result<(),T::Error> {
     out.write_usize_varint(tags.len())?;
@@ -71,6 +69,8 @@ fn write_post(post: &Post, prev_id: u32, out: &mut impl std::io::Write) -> Resul
     out.write_u32_varint(post.fav_count)?;
     out.write_i32_varint(post.score)?;
     out.write_u32_varint(post.parent_id.map(|x|x.get()).unwrap_or(0))?;
+    out.write_u16_varint(post.width)?;
+    out.write_u16_varint(post.height)?;
     serialize_tag_list(&post.tags, out)
 }
 
@@ -111,10 +111,12 @@ pub fn deserialize_post_database(file: &mut impl std::io::Read) -> std::io::Resu
         let fav_count = file.read_u32_varint()?;
         let score = file.read_i32_varint()?;
         let parent_id = NonZeroU32::new(file.read_u32_varint()?);
+        let width = file.read_u16_varint()?;
+        let height = file.read_u16_varint()?;
         let tags = deserialize_tag_list(&mut *file)?;
         v.push(Post {
             id: NonZeroU32::new(id).ok_or_else(|| std::io::Error::other("post had an ID of 0"))?, 
-            md5, rating, file_ext, fav_count, score, tags: tags.into(), parent_id,
+            md5, rating, file_ext, fav_count, score, tags: tags.into(), parent_id, width, height,
         });
     }
 
