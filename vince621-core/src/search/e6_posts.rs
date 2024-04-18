@@ -292,8 +292,23 @@ impl Kernel for PostKernel {
             buckets[*item] += 1;
         }
 
-        let mut post_tags = post.tags.iter().copied();
         let mut query_tags = self.tags.iter();
+
+        // in my testing, this binary search for the first tag made a full database search,
+        // on average, 10ms slower, so i've left it disabled.
+        /*
+        let Some(first_tag) = query_tags.next() else {return};
+
+        let start_pos = post.tags.binary_search(&first_tag.tag_id);
+
+        if start_pos.is_ok() {
+            buckets[first_tag.bucket]+=1;
+        }
+
+        let start_pos = start_pos.map(|x|x+1).unwrap_or_else(|x|x);
+
+        */
+        let mut post_tags = post.tags/*[start_pos..]*/.iter().copied();
         let mut cur_query_tag_opt = query_tags.next();
         let mut cur_post_tag_opt = post_tags.next();
         loop {
