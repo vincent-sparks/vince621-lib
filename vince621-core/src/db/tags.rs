@@ -119,27 +119,6 @@ mod phfwrapper {
     }
 }
 
-// Used by autocomplete() since BinaryHeap doesn't support passing a custom comparison function.
-#[repr(transparent)]
-#[derive(Debug)]
-struct PostCountOrderTagWrapper<'a>(&'a Tag);
-impl Ord for PostCountOrderTagWrapper<'_> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // into_sorted_vec() defaults to sorting in ascending order.
-        // we want to sort in descending order by post count, so we reverse the comparison.
-        other.0.post_count.cmp(&self.0.post_count)
-    }
-}
-impl Eq for PostCountOrderTagWrapper<'_> {}
-impl PartialOrd for PostCountOrderTagWrapper<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl PartialEq for PostCountOrderTagWrapper<'_> {
-    fn eq(&self,other:&Self)->bool{self.0.post_count==other.0.post_count}
-}
-
 impl TagDatabase {
     /**
      * Create a new tag database given a list of tags, which is not assumed to be sorted.
@@ -197,7 +176,7 @@ impl TagDatabase {
         #[cfg(not(feature="phf"))]
         self.tags.binary_search_by(|x| x.name.as_str().cmp(name)).ok()
     }
-    pub fn search_raw<'a>(&'a self, name: &'a str) -> impl Iterator<Item=&'a Tag> + 'a {
+    pub fn search_raw<'a,'b>(&'a self, name: &'b str) -> impl Iterator<Item=&'a Tag> + 'b where 'a:'b {
         let pos = match self.tags.binary_search_by(|tag| tag.name.as_str().cmp(name)) {
             Ok(x) => x,
             Err(x) => x,
@@ -267,6 +246,27 @@ impl TagDatabase {
     }
 
     pub fn autocomplete(&self, partial: &str, max_results: usize) -> Vec<&Tag> {
+        #[repr(transparent)]
+        #[derive(Debug)]
+        struct PostCountOrderTagWrapper<'a>(&'a Tag);
+        impl Ord for PostCountOrderTagWrapper<'_> {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                // into_sorted_vec() defaults to sorting in ascending order.
+                // we want to sort in descending order by post count, so we reverse the comparison.
+                other.0.post_count.cmp(&self.0.post_count)
+            }
+        }
+        impl Eq for PostCountOrderTagWrapper<'_> {}
+        impl PartialOrd for PostCountOrderTagWrapper<'_> {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl PartialEq for PostCountOrderTagWrapper<'_> {
+            fn eq(&self,other:&Self)->bool{self.0.post_count==other.0.post_count}
+        }
+
+
         let mut res = BinaryHeap::with_capacity(max_results.saturating_add(1));
         for tag in self.search_raw(partial) {
             res.push(PostCountOrderTagWrapper(tag));
@@ -275,8 +275,9 @@ impl TagDatabase {
             }
         }
         
-        // SAFETY: TagWrapper is a #[repr(transparent)] wrapper around &Tag
-        unsafe {std::mem::transmute::<Vec<PostCountOrderTagWrapper>, Vec<&Tag>>(res.into_sorted_vec())}
+        // I'm tempted to do a transmute here, but the nomicon says that might be UB
+        // and this will get optimized away anyway.
+        res.into_sorted_vec().into_iter().map(|x|x.0).collect()
     }
 }
 
@@ -320,11 +321,11 @@ impl TagAndImplicationDatabase {
         tags.iter().filter(move |tag| !s.contains(&tag.id))
     }
 
-    pub fn search_raw_aliases<'a,'b>(&'a self, name: &'b str) -> impl Iterator<Item=&'a Tag> + 'b where 'a:'b {
+    pub fn search_raw_aliases<'a,'b>(&'a self, name: &'b str) -> impl Iterator<Item=(&'a Tag, &'a str)> + 'b where 'a:'b {
         // TODO sort the aliases by name so we can do the cool optimization we did earlier.
         let pos = self.aliases.binary_search_by(|(k, _)| k.as_str().cmp(name)).unwrap_or_else(|x| x);
         
-        self.aliases[pos..].iter().take_while(move |(k, _)| k.as_str().starts_with(name)).map(move |(_, idx)| &self.tags.get_all()[*idx])
+        self.aliases[pos..].iter().take_while(move |(k, _)| k.as_str().starts_with(name)).map(move |(s, idx)| (&self.tags.get_all()[*idx], s.as_str()))
     }
 
     /**
@@ -333,28 +334,47 @@ impl TagAndImplicationDatabase {
      *
      * Unlike on e621.net, tag names always sort before alias names, so if you start typing the
      * name of an actual tag, the entire space won't get cluttered up by aliases for things you
-     * aren't looking for.  *cough* whyhasn'te621fixedthis *cough*
+     * aren't looking for which of course have much higher post counts.
+     * *cough* whyhasn'te621fixedthis *cough*
      *
      */
-    pub fn autocomplete<'a>(&'a self, partial: &str, max_results: usize) -> Vec<&'a Tag> {
-        let mut v = self.tags.autocomplete(partial, max_results);
-        let offset = v.partition_point(|tag| tag.post_count!=0);
+    pub fn autocomplete<'a>(&'a self, partial: &str, max_results: usize) -> Vec<(&'a Tag, Option<&'a str>)> {
+
+        #[derive(Debug)]
+        struct PostCountOrderTagWrapper<'a>(&'a Tag, &'a str);
+        impl Ord for PostCountOrderTagWrapper<'_> {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                // into_sorted_vec() defaults to sorting in ascending order.
+                // we want to sort in descending order by post count, so we reverse the comparison.
+                other.0.post_count.cmp(&self.0.post_count)
+            }
+        }
+        impl Eq for PostCountOrderTagWrapper<'_> {}
+        impl PartialOrd for PostCountOrderTagWrapper<'_> {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl PartialEq for PostCountOrderTagWrapper<'_> {
+            fn eq(&self,other:&Self)->bool{self.0.post_count==other.0.post_count}
+        }
+
+        let mut v = self.tags.autocomplete(partial, max_results).into_iter().map(|x| (x, None)).collect::<Vec<(&'a Tag, Option<&'a str>)>>();
+        let offset = v.partition_point(|(tag, _)| tag.post_count!=0);
         if offset < max_results {
             let mut rest = v[offset..].iter().copied().collect::<Vec<_>>();
             v.truncate(offset);
             let remaining = max_results - v.len();
             
-            let mut collector = BinaryHeap::with_capacity(remaining);
-            for tag in self.search_raw_aliases(partial) {
-                if collector.len() >= remaining {
+            let mut collector = BinaryHeap::with_capacity(remaining.saturating_add(1));
+            for (tag, alias) in self.search_raw_aliases(partial) {
+                collector.push(PostCountOrderTagWrapper(tag, alias));
+                if collector.len() > remaining {
                     collector.pop();
                 }
-                collector.push(PostCountOrderTagWrapper(tag));
             }
             let more_tags = collector.into_sorted_vec();
-            // SAFETY: PostCountOrderTagWrapper is a #[repr(transparent)] wrapper around &'a Tag
-            let mut more_tags = unsafe {std::mem::transmute::<Vec<PostCountOrderTagWrapper<'a>>, Vec<&'a Tag>>(more_tags)};
-            v.append(&mut more_tags);
+            v.extend(more_tags.into_iter().map(|a| (a.0, Some(a.1))));
             if v.len() < max_results {
                 rest.truncate(max_results-v.len());
                 v.append(&mut rest);
@@ -448,18 +468,43 @@ mod test {
             Tag {
                 category: TagCategory::General,
                 id: 5,
-                name: Yarn::from_static("abd_fghj"),
+                name: Yarn::from_static("abz_fghj"),
                 post_count: 0,
+            },
+            Tag {
+                category: TagCategory::General,
+                id: 6,
+                name: Yarn::from_static("abef"),
+                post_count: 1,
             },
         ].into());
 
-        assert_eq!(tag_db.autocomplete("ab", 6).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,5]);
+        assert_eq!(tag_db.autocomplete("ab", 6).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,6,5]);
+        assert_eq!(tag_db.autocomplete("ab", 4).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,6]);
+        assert_eq!(tag_db.autocomplete("ab", 3).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2]);
+        assert_eq!(tag_db.autocomplete("ab", 2).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1]);
+
+        let ac = tag_db.get_as_index("ac").unwrap();
 
         let tag_and_alias_db = TagAndImplicationDatabase::new(tag_db, HashMap::new(), vec![
-            (Yarn::from_static("abq"),4),
+            (Yarn::from_static("abq"),ac),
         ]);
 
-        assert_eq!(tag_and_alias_db.autocomplete("ab", 6).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,4,5]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 6).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6,4,5]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 5).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6,4]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 4).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 3).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2]);
+
+        let abd = tag_and_alias_db.tags.get_as_index("abd").unwrap();
+        let abc = tag_and_alias_db.tags.get_as_index("abc").unwrap();
+
+        let tag_and_alias_db = TagAndImplicationDatabase::new(tag_and_alias_db.tags, HashMap::new(), vec![
+            (Yarn::from_static("ace"),abd),
+            (Yarn::from_static("aca"),abc),
+        ]);
+
+        assert_eq!(tag_and_alias_db.autocomplete("ac", 6).iter().map(|i|i.0.id).collect::<Vec<_>>(), [4,1,2]);
+        assert_eq!(tag_and_alias_db.autocomplete("ac", 2).iter().map(|i|i.0.id).collect::<Vec<_>>(), [4,1]);
 
     }
 }
