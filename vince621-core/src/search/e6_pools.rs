@@ -10,7 +10,7 @@ use crate::db::posts::PostDatabase;
 use crate::db::tags::TagDatabase;
 
 use super::{Kernel, NestedQuery, NestedQueryParser};
-use super::e6_posts::{PostKernel, TagQueryParser};
+use super::e6_posts::{ExternalError, PostKernel, TagQueryParser};
 
 #[derive(Debug)]
 struct SequenceStep {
@@ -182,7 +182,7 @@ fn parse_counter_bound<'a, E>(input: &mut &'a str) -> PResult<CounterBound, E> w
     }
 }
 
-pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, query: &'a str) -> Result<NestedQuery<PoolKernel<'db>>, TreeError<&'a str>> {
+pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, query: &'a str) -> Result<NestedQuery<PoolKernel<'db>>, ExternalError<'a>> {
     let mut nqp = NestedQueryParser::<()>::new();
 
     let mut counters = Vec::new();
@@ -285,9 +285,12 @@ pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, qu
         }
     }
 */
+    // query[query.len()..] will of course be an empty string.
+    // we use this rather than &"" because the implementation of from_external_error() will panic
+    // if the argument passed is not a subslice of the original query.
     Ok(NestedQuery::new(
             nqp.finalize()
-            .map_err(|e| TreeError::from_external_error(&"",ErrorKind::Eof,e))?, 
+            .map_err(|e| ExternalError::from_external_error(&&query[query.len()..],ErrorKind::Eof,e))?, 
             PoolKernel {post_db, data: PoolKernelData {
                 counters, sequences
             }}))
@@ -318,7 +321,7 @@ fn parse_single<'a, E>(db: &TagDatabase, query: &mut &'a str) -> PResult<(Nested
         )),
     ).parse_next(query)?;
     space0.parse_next(query)?;
-    Ok((parser.finalize().map_err(|e| ErrMode::Cut(E::from_external_error(&"", ErrorKind::Eof, e)))?, terminator))
+    Ok((parser.finalize().map_err(|e| ErrMode::Cut(E::from_external_error(query, ErrorKind::Eof, e)))?, terminator))
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use winnow::ascii::space0;
-use winnow::combinator::{repeat, alt, seq};
-use winnow::error::{ContextError, TreeError};
+use winnow::combinator::{alt, cut_err, eof, repeat, repeat_till, seq};
+use winnow::error::{AddContext, ContextError, StrContext, TreeError};
 use winnow::error::ErrMode;
 use winnow::error::ErrorKind;
 use winnow::error::FromExternalError;
@@ -151,7 +151,7 @@ impl<'a, E> Parser<&'a str, (), E> for SortOrderParser where E: ParserError<&'a 
             },
             Err(e) => {
                 input.reset(&cp);
-                Err(ErrMode::Cut(E::from_external_error(input, ErrorKind::Verify, e)))
+                Err(ErrMode::Cut(E::from_external_error(&token, ErrorKind::Verify, e)))
             }
         }
     }
@@ -262,7 +262,7 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + Fro
                         },
                         Err(_) => {
                             input.reset(&checkpoint);
-                            return Err(ErrMode::Cut(E::from_external_error(input, ErrorKind::Slice, BadTag::BadRating))); // FIXME
+                            return Err(ErrMode::Cut(E::from_external_error(&&token[7..], ErrorKind::Slice, BadTag::BadRating))); // FIXME
                         }
                     }
                 }
@@ -277,7 +277,7 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + Fro
                     // the caller should reset to some suitable point for us, but we need to point to the
                     // error location for better error reporting.
                     input.reset(&checkpoint);
-                    Err(ErrMode::Backtrack(E::from_external_error(input, ErrorKind::Verify, BadTag::UnknownTag(token.to_owned()))))
+                    Err(ErrMode::Backtrack(E::from_external_error(&token, ErrorKind::Verify, BadTag::UnknownTag(token.to_owned()))))
                 }
             }
         }
@@ -314,7 +314,80 @@ impl Kernel for PostKernel {
     }
 }
 
-pub fn parse_query<'a>(db: &TagDatabase, query: &'a str) -> Result<NestedQuery<PostKernel>, TreeError<&'a str>> {
+#[derive(Debug)]
+pub struct ExternalError<'a>(&'a str, String, bool);
+
+impl<'a, E> FromExternalError<&'a str, E> for ExternalError<'a> where E: std::fmt::Display {
+    fn from_external_error(input: &&'a str, _: ErrorKind, e: E) -> Self {
+        ExternalError(input, e.to_string(), true)
+    }
+}
+
+impl<'a> ParserError<&'a str> for ExternalError<'a> {
+    fn from_error_kind(input: &&'a str, kind: ErrorKind) -> Self {
+        ExternalError(&input[..0], kind.to_string(), false)
+    }
+
+    fn append(self, input: &&'a str, token_start: &<&'a str as winnow::stream::Stream>::Checkpoint, _kind: ErrorKind) -> Self {
+        // get the offending token as a &str.
+        let end = *input;
+        let mut input = *input;
+        input.reset(token_start);
+        // SAFETY: both are guaranteed to be within the bounds of the same allocated object.
+        let delta = unsafe {end.as_ptr().offset_from(input.as_ptr())};
+        assert!(delta>=0);
+        let offending_token = &input[..delta as usize];
+        Self(if offending_token.is_empty() {self.0} else {offending_token}, self.1, self.2)
+    }
+
+    fn assert(input: &&'a str, error_message: &'static str) -> Self {
+        Self(&input[..0], error_message.into(), true)
+    }
+
+    fn or(self, other: Self) -> Self {
+        if !self.2 {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+impl<'a> AddContext<&'a str, StrContext> for ExternalError<'a>{
+    fn add_context(
+        mut self,
+        _input: &&'a str,
+        _token_start: &<&'a str as winnow::stream::Stream>::Checkpoint,
+        context: StrContext,
+    ) -> Self {
+        self.1=context.to_string();
+        self.2=true;
+        self
+    }
+}
+
+impl<'a> ExternalError<'a> {
+    pub fn get_range(&self, full_input: &'a str) -> (usize, usize) {
+        let inner_range = self.0.as_bytes().as_ptr_range();
+        let outer_range = full_input.as_bytes().as_ptr_range();
+        assert!(inner_range.start >= outer_range.start && inner_range.start <= outer_range.end);
+        assert!(inner_range.end >= outer_range.start && inner_range.end <= outer_range.end);
+        // SAFETY:
+        //  * full_input is a pointer to a single allocated object, with the same lifetime as our
+        //  error pointer.
+        //  * we have just verified that the pointer range of inner_range is a subset of
+        //  outer_range, so they must belong to the same allocated object.
+        unsafe {
+            (inner_range.start.sub_ptr(outer_range.start), inner_range.end.sub_ptr(outer_range.start))
+        }
+
+    }
+    pub fn into_reason(self)->String{
+        self.1
+    }
+}
+
+pub fn parse_query<'a>(db: &TagDatabase, query: &'a str) -> Result<NestedQuery<PostKernel>, ExternalError<'a>> {
     let mut tag_parser = TagQueryParser::new(db);
     let tag_parser_ref = &mut tag_parser;
     repeat(0..,
@@ -323,24 +396,145 @@ pub fn parse_query<'a>(db: &TagDatabase, query: &'a str) -> Result<NestedQuery<P
                space0,
                )
       ).parse(query).map_err(|e| e.into_inner())?;
-    tag_parser.finalize().map_err(|e| TreeError::from_external_error(&"", ErrorKind::Eof, e))
+    tag_parser.finalize().map_err(|e| ExternalError::from_external_error(&&query[query.len()..], ErrorKind::Eof, e))
 }
 
-pub fn parse_query_and_sort_order<'a>(db: &TagDatabase, query: &'a str) -> Result<(NestedQuery<PostKernel>, SortOrder), ContextError<&'a str>> {
+pub fn parse_query_and_sort_order<'a>(db: &TagDatabase, query: &'a str) -> Result<(NestedQuery<PostKernel>, SortOrder), ExternalError<'a>> {
     let mut tag_parser = TagQueryParser::new(db);
     let mut sort_order_parser = SortOrderParser::new();
     let tag_parser_ref = &mut tag_parser;
     let sort_order_parser_ref = &mut sort_order_parser;
-    repeat(0..,
-           seq!(
+    let _: ((),_) = repeat_till(0..,
+           cut_err(seq!(
                alt((
                    |input: &mut &'a str| sort_order_parser_ref.parse_next(input),
                    |input: &mut &'a str| tag_parser_ref.parse_next(input),
                )),
                space0,
-               )
+               )),
+            eof
       ).parse(query).map_err(|e| e.into_inner())?;
-    tag_parser.finalize().map_err(|e| ContextError::from_external_error(&"", ErrorKind::Eof, e)).map(|q| (q, sort_order_parser.finalize()))
+    tag_parser.finalize().map_err(|e| ExternalError::from_external_error(&&query[query.len()..], ErrorKind::Eof, e)).map(|q| (q, sort_order_parser.finalize()))
+}
+
+/// Parse a partial query that the user is currently editing, and return the token the cursor is in
+/// the middle of, as well as all the tokens in the same bucket as that token or an ancestor.  
+pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usize) -> Option<(&'a str, Vec<&'a str>)> {
+    let cursor_ptr = if cursor_position == query.len() {
+        None
+    } else {
+        Some(&query.as_bytes()[cursor_position] as *const u8)
+    };
+    let mut nested_parser = NestedQueryParser::<Vec<&'a str>>::new();
+    
+    while !query.is_empty() {
+        match Parser::<_,_,ErrorKind>::parse_next(&mut nested_parser, &mut query) {
+            Ok(_) => {},
+            Err(ErrMode::Cut(_)) => return None,
+            Err(ErrMode::Backtrack(_)) => {
+                let end_pos = query.find([' ','}']).unwrap_or(query.len());
+                let token = &query[..end_pos];
+                query = &query[end_pos..];
+                let did_we_find_it = match &cursor_ptr {
+                    Some(ptr) => token.as_bytes().as_ptr_range().contains(ptr),
+                    None => query.is_empty(),
+                };
+                if did_we_find_it {
+                    // we found it!  enter phase two!
+                    
+                    // first, find all string lists in the current call stack and concatenate them.
+                    // we want to return a list of all tag names checked anywhere in the current
+                    // stack so we can avoid showing the user duplicate entries.
+                    let mut stack = nested_parser.stack.into_iter();
+                    let bottom_frame = stack.next().expect("NestedQueryParserStack should NEVER become empty!");
+                    let mut ancestors = bottom_frame.data;
+                    for frame in stack {
+                        // we now work through the stack from the second-bottom frame toward the
+                        // top, expanding our list of seen tokens.  this means that our list of
+                        // seen tokens will be returned to the caller in the order they appeared in
+                        // the string.  we do it this way, using a full fledged NestedQueryParser
+                        // instead of just keeping a single Vec, appending tokens we find and
+                        // skipping nested query brackets, partly because it's easier and partly
+                        // because if we do it this way, we can avoid returning any tokens that
+                        // appeared in other buckets that the user might want to autocomplete again.
+                        //
+                        // for example in the following query, where $ is the cursor position:
+                        // all{ hyena 1-{ dog cat } 1-{ mouse $
+                        // autocompleting "cat" again might be desirable, producing in our
+                        // contrived example a query equivalent to "cat 1-{ dog mouse }", but
+                        // autocompleting "hyena" would not, since it is already guaranteed to be
+                        // present by the parent bucket.
+                        let mut data = frame.data;
+                        ancestors.append(&mut data);
+                    }
+
+                    // now we need to parse the rest of the query, in case the user went back and
+                    // edited what they had already written.  in this case, the cursor will be in
+                    // the middle, and we'll still have plenty of query left.  we need to extract
+                    // all tokens that are attached to either the bucket the cursor is in or one of
+                    // its direct ancestors, but no other buckets.
+
+                    'a: while !query.is_empty() {
+                        let mut start_of_discarded_region = query.find(['{','}']);
+                        let mut end_of_discarded_region = start_of_discarded_region;
+                        if let Some(pos2) = start_of_discarded_region {
+                            if query.as_bytes()[pos2]==b'{' {
+                                let mut depth = 1u32;
+                                let mut pos3 = pos2+1; // it is 2AM.  this is the best variable name
+                                                       // i can come up with.
+                                'b:{
+                                    while depth > 0 {
+                                        dbg!(pos3);
+                                        dbg!(query);
+                                        dbg!(&query[pos3..]);
+                                        match query[pos3..].find(['{','}']) {
+                                            Some(pos) => {
+                                                pos3+=pos;
+                                                if query.as_bytes()[pos3]==b'{' {
+                                                    depth += 1;
+                                                } else if query.as_bytes()[pos3]==b'}'{
+                                                    depth -= 1;
+                                                } else{panic!()}
+                                                dbg!(depth);
+                                                pos3+=1;//advance past the curly brace
+                                            }
+                                            None => {
+                                                start_of_discarded_region = None;
+                                                end_of_discarded_region = None;
+                                                dbg!(query);
+                                                break 'b;
+                                            }
+                                        }
+                                    }
+                                    end_of_discarded_region = Some(pos3);
+                                    start_of_discarded_region = query[..pos2].rfind([' ','}']);
+                                    assert!(end_of_discarded_region.is_none() || end_of_discarded_region.unwrap() > start_of_discarded_region.unwrap());
+                                }
+
+                            }
+                        }
+                        let partial_query = start_of_discarded_region.map(|pos| &query[..pos]).unwrap_or(query);
+                        partial_query.split(' ').filter(|x|!x.is_empty()).for_each(|token| ancestors.push(token));
+                        match end_of_discarded_region {
+                            Some(pos) => query = &query[pos+1..],
+                            None => break
+                        }
+
+                    }
+                    // put any remaining tokens in the query into the list.
+                    query.split(' ').filter(|x|!x.is_empty()).for_each(|token| ancestors.push(token));
+
+                    return Some((token, ancestors));
+                } else {
+                    nested_parser.get_data().push(token);
+                }
+            },
+            _ => {},
+        }
+        space0::<_, ErrorKind>.parse_next(&mut query).unwrap();
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -409,5 +603,22 @@ mod test {
         dbg!(&res.0);
         assert_eq!(res.0.kernel.tags.iter().map(|x|x.tag_id).collect::<Vec<_>>(), vec![1,2,3]);
         assert_eq!(res.1, SortOrder::FavCountAscending);
+    }
+
+    #[test]
+    fn test_autocomplete() {
+        let s = "yes1 all{ yes2 1-{ no1 } all{no2} yes3$ yes4  yes5 all{no3 all{ no4 } } yes6 } yes7 all{ no4}1-{no5} 1-{no6 1-{no7}}yes8";
+        let pos = s.find('$').unwrap();
+        let (token, others) = parse_query_for_autocomplete(s, pos).unwrap();
+        assert_eq!(token, "yes3$");
+        assert_eq!(others, vec!["yes1","yes2","yes4","yes5","yes6","yes7", "yes8"]);
+        let pos = s.len();
+        let (token, others) = parse_query_for_autocomplete(s, pos).unwrap();
+        assert_eq!(token,"yes6");
+        assert_eq!(others,vec!["yes1","yes8"]);
+        // if the cursor is positioned on a nested query token (curly brace) we should return None
+        let pos = s.find('-').unwrap();
+        assert!(parse_query_for_autocomplete(s,pos).is_none());
+
     }
 }
