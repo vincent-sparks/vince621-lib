@@ -63,11 +63,11 @@ pub struct Post {
     pub height: u16,
 }
 
-#[derive(Debug,PartialEq,Eq)]
+#[derive(Debug,PartialEq,Eq,PartialOrd,Ord,Clone,Copy)]
 pub enum ImageResolution {
     /// 150px Thumbnail
     Preview,
-    /// 800px Low-res
+    /// 850px Low-res
     Sample,
     /// Full image
     Full,
@@ -98,7 +98,7 @@ impl Post {
         let mut res = self.width >= 850;
         if self.file_ext == FileExtension::PNG {
             // tag 194541 is "animated_png".  e621ng will not thumbnail posts with this tag.
-            res &= self.tags.binary_search(&194541).is_ok();
+            res &= self.tags.binary_search(&194541).is_err();
         }
         res
     }
