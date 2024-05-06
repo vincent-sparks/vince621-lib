@@ -105,7 +105,7 @@ impl Post {
     pub fn has_preview(&self) -> bool {
         self.file_ext != FileExtension::SWF
     }
-    pub fn url_and_extension(&self, mut res: ImageResolution) -> (String, FileExtension) {
+    pub fn url_and_extension(&self, mut res: ImageResolution) -> (String, ImageResolution, FileExtension) {
 
         if (res==ImageResolution::Preview && !self.has_preview()) || (res==ImageResolution::Sample && !self.has_sample()) {
             res = ImageResolution::Full;
@@ -124,6 +124,7 @@ impl Post {
                 self.md5.encode_hex::<String>(),
                 ext
                 ),
+            res,
             ext)
     }
 

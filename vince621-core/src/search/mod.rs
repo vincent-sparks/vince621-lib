@@ -123,6 +123,15 @@ impl<Data: Default> NestedQueryParser<Data> {
     pub fn new_ancillary_bucket(&mut self, min: Option<u8>, max: Option<u8>) -> usize {
         let last_idx = self.stack.len()-1;
         let stack_frame = &mut self.stack[last_idx].items;
+        let stack_bucket = &self.buckets[stack_frame[0].bucket_idx];
+        // optimize by not creating another bucket if we don't have to.
+        // if our argument is "exactly 1", "1 or more", or "all", and so is the bucket it is targeting, it makes
+        // no difference whether we create a new bucket or just put the stuff that would have gone
+        // in the new bucket into the target bucket instead.  so if that's the case we just return
+        // the slot index of the target bucket (which at present is always 0)
+        if (min==None || min==Some(1)) && (max==None || max==min) && max==stack_bucket.max && min==stack_bucket.min {
+            return 0;
+        }
         let new_slot_idx = stack_frame.len();
         let new_bucket_idx = self.buckets.len();
         stack_frame[0].count+=1;
@@ -237,7 +246,7 @@ mod test {
     struct NullKernel;
     impl Kernel for NullKernel {
         type Post=();
-        fn validate(&self, obj: &Self::Post, buckets: &mut [u8]) {
+        fn validate(&self, _post: &Self::Post, _buckets: &mut [u8]) {
         }
     }
     #[test]

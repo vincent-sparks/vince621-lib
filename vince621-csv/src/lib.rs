@@ -85,3 +85,56 @@ pub fn load_date<R: BufRead>(date: &str, download_callback: impl Fn(String, &'st
         pool: pool_db,
     })
 }
+
+#[derive(Eq,PartialEq,Clone,Copy,Debug)]
+pub enum LoadWhat {
+    Posts, Tags, Pools, TagImplications, TagAliases, WikiPages,
+}
+
+impl LoadWhat {
+    fn as_str(self)->&'static str {
+        match self {
+            Self::Posts=>"posts",
+            Self::Tags=>"tags",
+            Self::Pools=>"pools",
+            Self::TagImplications=>"tag_implications",
+            Self::TagAliases=>"tag_aliases",
+            Self::WikiPages=>"wiki_pages",
+        }
+    }
+}
+
+pub trait Loader {
+    fn load(self, what: LoadWhat) -> std::io::Result<impl std::io::BufRead>;
+}
+
+pub struct AlreadyLoaded<T>(pub T);
+
+impl<T> Loader for AlreadyLoaded<T> where T: std::io::BufRead {
+    fn load(self, _: LoadWhat) -> std::io::Result<impl std::io::BufRead> {
+        Ok(self.0)
+    }
+}
+
+pub trait UrlLoader {
+    fn load(&self, url: String) -> std::io::Result<impl std::io::BufRead>;
+}
+
+pub struct Date {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub tag_db_size: u64,
+    pub post_db_size: u64,
+    pub tag_implication_size: u64,
+    pub tag_alias_size: u64,
+    pub wiki_page_size: u64,
+}
+
+pub struct DateLoader<T>(pub Date, pub T);
+
+impl<T> Loader for &DateLoader<T> where T: UrlLoader {
+    fn load(self, what: LoadWhat) -> std::io::Result<impl std::io::BufRead> {
+        self.1.load(format!("https://e621.net/db_export/{}-{:04}-{:02}-{:02}.csv.gz", what.as_str(), self.0.year, self.0.month, self.0.day))
+    }
+}

@@ -284,6 +284,18 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + Fro
     }
 }
 
+#[multiversion::multiversion(targets="simd")]
+fn validate_simd(query_tags: &[Tag], post_tags: &[u32], bucekts: &mut [u8]) {
+    const width: Option<usize> = multiversion::target::selected_target!().suggested_simd_width::<u32>();
+    match width {
+        Some(_)=> {
+            let (start, simd, end) = post_tags.as_simd::<{match width {Some(x)=>x, None=>unreachable!()}}>();
+        },
+        None => {
+        }
+    }
+}
+
 impl Kernel for PostKernel {
     type Post = posts::Post;
 

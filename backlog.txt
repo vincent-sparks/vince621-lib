@@ -1,0 +1,4 @@
+# I put here features I haven't gotten to yet.
+
+* Look into rkyv to maybe do something about my 1GB idle memory usage.
+* Parameterize Post over the type of the tag database to support e.g. &str on extremely low-spec devices.
