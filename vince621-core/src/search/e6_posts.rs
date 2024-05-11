@@ -287,9 +287,11 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + Fro
 #[multiversion::multiversion(targets="simd")]
 fn validate_simd(query_tags: &[Tag], post_tags: &[u32], bucekts: &mut [u8]) {
     const width: Option<usize> = multiversion::target::selected_target!().suggested_simd_width::<u32>();
+    const real_width: usize = match width {Some(x)=>x, None=>1};
     match width {
         Some(_)=> {
-            let (start, simd, end) = post_tags.as_simd::<{match width {Some(x)=>x, None=>unreachable!()}}>();
+            let (start, simd, end) = post_tags.as_simd::<real_width>();
+            let mut it = post_tags.iter();
         },
         None => {
         }
@@ -447,17 +449,18 @@ pub fn parse_query_and_sort_order<'a>(db: &TagDatabase, query: &'a str) -> Resul
     tag_parser.finalize().map_err(|e| ExternalError::from_external_error(&&query[query.len()..], ErrorKind::Eof, e)).map(|q| (q, sort_order_parser.finalize()))
 }
 
+fn range_to_range_inclusive<T>(arg: std::ops::Range<T>) -> std::ops::RangeInclusive<T> {
+    arg.start..=arg.end
+}
+
 /// Parse a partial query that the user is currently editing, and return the token the cursor is in
 /// the middle of, as well as all the tokens in the same bucket as that token or an ancestor.  
 pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usize) -> Option<(&'a str, Vec<&'a str>)> {
-    let cursor_ptr = if cursor_position == query.len() {
-        None
-    } else {
-        Some(&query.as_bytes()[cursor_position] as *const u8)
-    };
+    assert!(cursor_position <= query.len());
+    let cursor_ptr = query.as_bytes().as_ptr().wrapping_add(cursor_position);
     let mut nested_parser = NestedQueryParser::<Vec<&'a str>>::new();
     
-    while !query.is_empty() {
+    loop {
         match Parser::<_,_,ErrorKind>::parse_next(&mut nested_parser, &mut query) {
             Ok(_) => {},
             Err(ErrMode::Cut(_)) => return None,
@@ -465,11 +468,8 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
                 let end_pos = query.find([' ','}']).unwrap_or(query.len());
                 let token = &query[..end_pos];
                 query = &query[end_pos..];
-                let did_we_find_it = match &cursor_ptr {
-                    Some(ptr) => token.as_bytes().as_ptr_range().contains(ptr),
-                    None => query.is_empty(),
-                };
-                if did_we_find_it {
+                let did_we_find_it = range_to_range_inclusive(token.as_bytes().as_ptr_range()).contains(&cursor_ptr);
+                if did_we_find_it || query.is_empty() {
                     // we found it!  enter phase two!
                     
                     // first, find all string lists in the current call stack and concatenate them.
@@ -505,8 +505,10 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
                     // its direct ancestors, but no other buckets.
 
                     'a: while !query.is_empty() {
+                        // these two variables are bounds of a region we will not parse, both ends
+                        // inclusive.
                         let mut start_of_discarded_region = query.find(['{','}']);
-                        let mut end_of_discarded_region = start_of_discarded_region;
+                        let mut end_of_discarded_region = start_of_discarded_region.map(|x|x+1);
                         if let Some(pos2) = start_of_discarded_region {
                             if query.as_bytes()[pos2]==b'{' {
                                 let mut depth = 1u32;
@@ -514,9 +516,9 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
                                                        // i can come up with.
                                 'b:{
                                     while depth > 0 {
-                                        dbg!(pos3);
-                                        dbg!(query);
-                                        dbg!(&query[pos3..]);
+                                        //dbg!(pos3);
+                                        //dbg!(query);
+                                        //dbg!(&query[pos3..]);
                                         match query[pos3..].find(['{','}']) {
                                             Some(pos) => {
                                                 pos3+=pos;
@@ -525,28 +527,31 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
                                                 } else if query.as_bytes()[pos3]==b'}'{
                                                     depth -= 1;
                                                 } else{panic!()}
-                                                dbg!(depth);
+                                                //dbg!(depth);
                                                 pos3+=1;//advance past the curly brace
                                             }
                                             None => {
                                                 start_of_discarded_region = None;
                                                 end_of_discarded_region = None;
-                                                dbg!(query);
+                                                //dbg!(query);
                                                 break 'b;
                                             }
                                         }
                                     }
                                     end_of_discarded_region = Some(pos3);
+                                    // at this point in the function, start_of_discarded_region will be positioned on the { character.  we also want to
+                                    // ignore the range that precedes it, so seek backwards until we find that.
                                     start_of_discarded_region = query[..pos2].rfind([' ','}']);
-                                    assert!(end_of_discarded_region.is_none() || end_of_discarded_region.unwrap() > start_of_discarded_region.unwrap());
+                                    assert!(end_of_discarded_region.is_none() || start_of_discarded_region.is_none() || end_of_discarded_region.unwrap() > start_of_discarded_region.unwrap());
                                 }
 
                             }
                         }
-                        let partial_query = start_of_discarded_region.map(|pos| &query[..pos]).unwrap_or(query);
-                        partial_query.split(' ').filter(|x|!x.is_empty()).for_each(|token| ancestors.push(token));
+                        if let Some(partial_query) = start_of_discarded_region.map(|pos| &query[..pos]) {
+                            partial_query.split(' ').filter(|x|!x.is_empty()).for_each(|token| ancestors.push(token));
+                        }
                         match end_of_discarded_region {
-                            Some(pos) => query = &query[pos+1..],
+                            Some(pos) => query = &query[pos..],
                             None => break
                         }
 
@@ -564,7 +569,15 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
         space0::<_, ErrorKind>.parse_next(&mut query).unwrap();
     }
 
+                /*
+    // if we reach the end of the string without hitting a token, and the cursor is also at the end
+    // of the string, return the empty string and an empty list of children.
+    if query.as_bytes().as_ptr() == cursor_ptr {
+        return Some((query, vec![]));
+    }
+
     None
+    */
 }
 
 #[cfg(test)]
@@ -637,18 +650,36 @@ mod test {
 
     #[test]
     fn test_autocomplete() {
-        let s = "yes1 all{ yes2 1-{ no1 } all{no2} yes3$ yes4  yes5 all{no3 all{ no4 } } yes6 } yes7 all{ no4}1-{no5} 1-{no6 1-{no7}}yes8";
-        let pos = s.find('$').unwrap();
+        // TODO make it so that nested all{ and 1-{ are treated as a single bucket.
+        let s = "yes1 all{ yes2 1-{ no1 } all{no2} yes3$ yes4  yes5   all{no3 all{ no4 } } yes6 } yes7 all{ no4}1-{no5} 1-{no6 1-{no7}}yes8";
+        let pos = s.find('$').unwrap()+1;
         let (token, others) = parse_query_for_autocomplete(s, pos).unwrap();
         assert_eq!(token, "yes3$");
         assert_eq!(others, vec!["yes1","yes2","yes4","yes5","yes6","yes7", "yes8"]);
+        println!("passed the first test!");
         let pos = s.len();
         let (token, others) = parse_query_for_autocomplete(s, pos).unwrap();
-        assert_eq!(token,"yes6");
-        assert_eq!(others,vec!["yes1","yes8"]);
+        assert_eq!(token,"yes8");
+        assert_eq!(others,vec!["yes1","yes7"]);
+        println!("passed the second test!");
         // if the cursor is positioned on a nested query token (curly brace) we should return None
         let pos = s.find('-').unwrap();
         assert!(parse_query_for_autocomplete(s,pos).is_none());
 
+    }
+
+    #[test]
+    fn test_autocomplete_starts_with_number() {
+        let s = "a b 3c 4d";
+        let pos = s.find('3').unwrap();
+        let (token, others) = parse_query_for_autocomplete(s, pos).unwrap();
+        assert_eq!(token, "3c");
+        assert_eq!(others, vec!["a","b","4d"]);
+    }
+
+    #[test]
+    fn test_autocomplete_empty_string() {
+        assert_eq!(parse_query_for_autocomplete("", 0), Some(("",vec![])));
+        assert_eq!(parse_query_for_autocomplete("a ", 0), Some(("",vec!["a"])));
     }
 }

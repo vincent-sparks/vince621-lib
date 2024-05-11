@@ -245,7 +245,7 @@ impl TagDatabase {
         }
     }
 
-    pub fn autocomplete(&self, partial: &str, max_results: usize) -> Vec<&Tag> {
+    pub fn autocomplete(&self, partial: &str, max_results: usize, ignore: &[u32]) -> Vec<&Tag> {
         #[repr(transparent)]
         #[derive(Debug)]
         struct PostCountOrderTagWrapper<'a>(&'a Tag);
@@ -269,9 +269,11 @@ impl TagDatabase {
 
         let mut res = BinaryHeap::with_capacity(max_results.saturating_add(1));
         for tag in self.search_raw(partial) {
-            res.push(PostCountOrderTagWrapper(tag));
-            if res.len() > max_results {
-                res.pop();
+            if !ignore.contains(&tag.id) {
+                res.push(PostCountOrderTagWrapper(tag));
+                if res.len() > max_results {
+                    res.pop();
+                }
             }
         }
         
@@ -337,8 +339,11 @@ impl TagAndImplicationDatabase {
      * aren't looking for which of course have much higher post counts.
      * *cough* whyhasn'te621fixedthis *cough*
      *
+     * The "ignore" argument specifies IDs of tags that should not be returned even if they would
+     * otherwise match.  You can use this, for example, to avoid showing autocomplete results for
+     * tags that the user has already typed into the current query.
      */
-    pub fn autocomplete<'a>(&'a self, partial: &str, max_results: usize) -> Vec<(&'a Tag, Option<&'a str>)> {
+    pub fn autocomplete<'a>(&'a self, partial: &str, max_results: usize, ignore: &[u32]) -> Vec<(&'a Tag, Option<&'a str>)> {
 
         #[derive(Debug)]
         struct PostCountOrderTagWrapper<'a>(&'a Tag, &'a str);
@@ -359,7 +364,7 @@ impl TagAndImplicationDatabase {
             fn eq(&self,other:&Self)->bool{self.0.post_count==other.0.post_count}
         }
 
-        let mut v = self.tags.autocomplete(partial, max_results).into_iter().map(|x| (x, None)).collect::<Vec<(&'a Tag, Option<&'a str>)>>();
+        let mut v = self.tags.autocomplete(partial, max_results, ignore).into_iter().map(|x| (x, None)).collect::<Vec<(&'a Tag, Option<&'a str>)>>();
         let offset = v.partition_point(|(tag, _)| tag.post_count!=0);
         if offset < max_results {
             let mut rest = v[offset..].iter().copied().collect::<Vec<_>>();
@@ -368,9 +373,11 @@ impl TagAndImplicationDatabase {
             
             let mut collector = BinaryHeap::with_capacity(remaining.saturating_add(1));
             for (tag, alias) in self.search_raw_aliases(partial) {
-                collector.push(PostCountOrderTagWrapper(tag, alias));
-                if collector.len() > remaining {
-                    collector.pop();
+                if !ignore.contains(&tag.id) {
+                    collector.push(PostCountOrderTagWrapper(tag, alias));
+                    if collector.len() > remaining {
+                        collector.pop();
+                    }
                 }
             }
             let more_tags = collector.into_sorted_vec();
@@ -479,10 +486,10 @@ mod test {
             },
         ].into());
 
-        assert_eq!(tag_db.autocomplete("ab", 6).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,6,5]);
-        assert_eq!(tag_db.autocomplete("ab", 4).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,6]);
-        assert_eq!(tag_db.autocomplete("ab", 3).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2]);
-        assert_eq!(tag_db.autocomplete("ab", 2).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1]);
+        assert_eq!(tag_db.autocomplete("ab", 6, &[]).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,6,5]);
+        assert_eq!(tag_db.autocomplete("ab", 4, &[]).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,6]);
+        assert_eq!(tag_db.autocomplete("ab", 3, &[]).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2]);
+        assert_eq!(tag_db.autocomplete("ab", 2, &[]).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1]);
 
         let ac = tag_db.get_as_index("ac").unwrap();
 
@@ -490,10 +497,10 @@ mod test {
             (Yarn::from_static("abq"),ac),
         ]);
 
-        assert_eq!(tag_and_alias_db.autocomplete("ab", 6).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6,4,5]);
-        assert_eq!(tag_and_alias_db.autocomplete("ab", 5).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6,4]);
-        assert_eq!(tag_and_alias_db.autocomplete("ab", 4).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6]);
-        assert_eq!(tag_and_alias_db.autocomplete("ab", 3).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 6, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6,4,5]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 5, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6,4]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 4, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 3, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2]);
 
         let abd = tag_and_alias_db.tags.get_as_index("abd").unwrap();
         let abc = tag_and_alias_db.tags.get_as_index("abc").unwrap();
@@ -503,8 +510,8 @@ mod test {
             (Yarn::from_static("aca"),abc),
         ]);
 
-        assert_eq!(tag_and_alias_db.autocomplete("ac", 6).iter().map(|i|i.0.id).collect::<Vec<_>>(), [4,1,2]);
-        assert_eq!(tag_and_alias_db.autocomplete("ac", 2).iter().map(|i|i.0.id).collect::<Vec<_>>(), [4,1]);
+        assert_eq!(tag_and_alias_db.autocomplete("ac", 6, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [4,1,2]);
+        assert_eq!(tag_and_alias_db.autocomplete("ac", 2, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [4,1]);
 
     }
 }
