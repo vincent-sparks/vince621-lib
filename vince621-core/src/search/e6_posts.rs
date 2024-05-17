@@ -1,3 +1,5 @@
+use std::simd::cmp::{SimdPartialEq as _, SimdPartialOrd as _};
+use std::simd::{LaneCount, Simd, SupportedLaneCount};
 use std::str::FromStr;
 
 use winnow::ascii::space0;
@@ -19,7 +21,7 @@ use super::{NestedQueryParser, Kernel};
 use super::NestedQuery;
 
 #[derive(Debug)]
-struct Tag {
+struct SearchedTag {
     tag_id: u32,
     bucket: usize,
 }
@@ -32,13 +34,13 @@ struct StackFrameData {
 
 #[derive(Debug)]
 pub struct PostKernel {
-    tags: Box<[Tag]>,
+    tags: Box<[SearchedTag]>,
     ratings: [Vec<usize>; 3],
 }
 
 pub(crate) struct TagQueryParser<'a> {
     db: &'a TagDatabase,
-    tags: Vec<Tag>,
+    tags: Vec<SearchedTag>,
     ratings: [Vec<usize>; 3],
     nested_query: NestedQueryParser<StackFrameData>,
 }
@@ -268,7 +270,7 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + Fro
                 }
                 for tag in self.db.search_wildcard(token) {
                     found_any = true;
-                    self.tags.push(Tag {tag_id: tag.id, bucket: self.nested_query.get_current_bucket(slot)});
+                    self.tags.push(SearchedTag {tag_id: tag.id, bucket: self.nested_query.get_current_bucket(slot)});
                     self.nested_query.increment_count(slot, 1);
                 }
                 if found_any {
@@ -285,15 +287,72 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + Fro
 }
 
 #[multiversion::multiversion(targets="simd")]
-fn validate_simd(query_tags: &[Tag], post_tags: &[u32], bucekts: &mut [u8]) {
+fn validate_simd(query_tags: &[SearchedTag], post_tags: &[u32], buckets: &mut [u8]) {
     const width: Option<usize> = multiversion::target::selected_target!().suggested_simd_width::<u32>();
     const real_width: usize = match width {Some(x)=>x, None=>1};
+
+    let mut query_tags = query_tags.iter();
     match width {
-        Some(_)=> {
+        Some(w)=> {
             let (start, simd, end) = post_tags.as_simd::<real_width>();
-            let mut it = post_tags.iter();
+            let next_tag = validate_sequential(None, &mut query_tags, start, &mut *buckets);
+            let current_tag = match next_tag {
+                Some(tag) => tag,
+                None => return,
+            };
+
+            let next_tag = validate_simd_internal(current_tag, &mut query_tags, simd, &mut *buckets);
+            let current_tag = match next_tag {
+                Some(tag) => tag,
+                None => return,
+            };
+            
+            validate_sequential(Some(current_tag), &mut query_tags, end, buckets);
         },
         None => {
+            validate_sequential(None, &mut query_tags, post_tags, buckets);
+        }
+    }
+}
+
+#[inline(always)]
+fn validate_sequential<'a>(initial: Option<&'a SearchedTag>, query_tags: &mut impl Iterator<Item=&'a SearchedTag>, post_tags: &[u32], buckets: &mut [u8]) -> Option<&'a SearchedTag> {
+    let mut tag = initial.or_else(|| query_tags.next())?;
+    let mut it = post_tags.into_iter().copied();
+    let mut post_tag = match it.next() {
+        Some(x)=>x,
+        None=>return Some(tag),
+    };
+    loop {
+        if post_tag == tag.tag_id {
+            buckets[tag.bucket]+=1;
+        }
+        if post_tag >= tag.tag_id {
+            tag = query_tags.next()?;
+        } else {
+            post_tag = match it.next() {
+                Some(x)=>x,
+                None=>return Some(tag),
+            };
+        }
+    }
+}
+
+#[inline(always)]
+fn validate_simd_internal<'a, const N: usize>(mut current_tag: &'a SearchedTag, query_tags: &mut impl Iterator<Item=&'a SearchedTag>, post_tags: &[Simd<u32, N>], buckets: &mut [u8]) -> Option<&'a SearchedTag> where LaneCount<N>: SupportedLaneCount {
+    let mut tag_splat = Simd::splat(current_tag.tag_id);
+    let mut simd_it = post_tags.into_iter();
+    let mut simd_row= simd_it.next()?;
+    loop {
+        if simd_row.simd_ge(tag_splat).any() {
+            buckets[current_tag.bucket]+= (simd_row.simd_eq(tag_splat).any()) as u8;
+            current_tag = query_tags.next()?;
+            tag_splat = Simd::splat(current_tag.tag_id);
+        } else {
+            simd_row = match simd_it.next() {
+                Some(x) => x,
+                None => return Some(current_tag),
+            }
         }
     }
 }
@@ -343,6 +402,9 @@ impl Kernel for PostKernel {
                 _ => break,
             }
         }
+        // simd validation still has some bugs which i don't feel like fixing rn
+        // and turned out not to be faster so i'm leaving it disabled for now
+        //validate_simd(&self.tags, &post.tags, buckets);
     }
 }
 
@@ -459,17 +521,21 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
     assert!(cursor_position <= query.len());
     let cursor_ptr = query.as_bytes().as_ptr().wrapping_add(cursor_position);
     let mut nested_parser = NestedQueryParser::<Vec<&'a str>>::new();
+
+    let cursor_is_at_end = cursor_position==query.len();
     
-    loop {
+    while query.as_bytes().as_ptr() <= cursor_ptr {
+        let checkpoint = query.checkpoint();
         match Parser::<_,_,ErrorKind>::parse_next(&mut nested_parser, &mut query) {
             Ok(_) => {},
             Err(ErrMode::Cut(_)) => return None,
             Err(ErrMode::Backtrack(_)) => {
+                query.reset(&checkpoint);
                 let end_pos = query.find([' ','}']).unwrap_or(query.len());
                 let token = &query[..end_pos];
                 query = &query[end_pos..];
                 let did_we_find_it = range_to_range_inclusive(token.as_bytes().as_ptr_range()).contains(&cursor_ptr);
-                if did_we_find_it || query.is_empty() {
+                if did_we_find_it {
                     // we found it!  enter phase two!
                     
                     // first, find all string lists in the current call stack and concatenate them.
@@ -569,15 +635,13 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
         space0::<_, ErrorKind>.parse_next(&mut query).unwrap();
     }
 
-                /*
     // if we reach the end of the string without hitting a token, and the cursor is also at the end
     // of the string, return the empty string and an empty list of children.
-    if query.as_bytes().as_ptr() == cursor_ptr {
+    if query.is_empty() && cursor_is_at_end {
         return Some((query, vec![]));
     }
 
     None
-    */
 }
 
 #[cfg(test)]
@@ -664,7 +728,7 @@ mod test {
         println!("passed the second test!");
         // if the cursor is positioned on a nested query token (curly brace) we should return None
         let pos = s.find('-').unwrap();
-        assert!(parse_query_for_autocomplete(s,pos).is_none());
+        assert_eq!(parse_query_for_autocomplete(s,pos), None);
 
     }
 
@@ -680,6 +744,53 @@ mod test {
     #[test]
     fn test_autocomplete_empty_string() {
         assert_eq!(parse_query_for_autocomplete("", 0), Some(("",vec![])));
-        assert_eq!(parse_query_for_autocomplete("a ", 0), Some(("",vec!["a"])));
+        assert_eq!(parse_query_for_autocomplete("a ", 2), Some(("",vec!["a"])));
+        //assert_eq!(parse_query_for_autocomplete("a  b", 2), Some(("",vec!["a","b"])));
+    }
+
+    #[test]
+    fn test_validate_simd() {
+        use super::SearchedTag;
+        let post_tags: [Simd<u32,2>;5] = [Simd::from([1,2]), Simd::from([3,5]), Simd::from([6,7]), Simd::from([8,9]), Simd::from([10,11])];
+        let mut buckets = [0u8; 6];
+        let tags = [
+            SearchedTag{tag_id: 1, bucket: 1},
+            SearchedTag{tag_id: 1, bucket: 2},
+            SearchedTag{tag_id: 2, bucket: 2},
+            SearchedTag{tag_id: 4, bucket: 0},
+            SearchedTag{tag_id: 6, bucket: 3},
+            SearchedTag{tag_id: 8, bucket: 4},
+            SearchedTag{tag_id: 10, bucket: 5},
+            SearchedTag{tag_id: 11, bucket: 5},
+            SearchedTag{tag_id: 12, bucket: 5},
+        ];
+        let res = validate_simd_internal(&tags[0], &mut tags[1..].iter(), post_tags.as_slice(), &mut buckets);
+        assert_eq!(res.unwrap().tag_id, 12);
+        assert_eq!(buckets, [0,1,2,1,1,2]);
+    }
+
+    #[test]
+    fn test_validate_sequential() {
+        use super::SearchedTag;
+        let post_tags = [0,1,2,3,5,6,7,8];
+        let tags = [
+            SearchedTag{tag_id: 1, bucket: 1},
+            SearchedTag{tag_id: 1, bucket: 2},
+            SearchedTag{tag_id: 2, bucket: 2},
+            SearchedTag{tag_id: 4, bucket: 0},
+            SearchedTag{tag_id: 6, bucket: 3},
+            SearchedTag{tag_id: 8, bucket: 4},
+            SearchedTag{tag_id: 10, bucket: 5},
+            SearchedTag{tag_id: 11, bucket: 5},
+        ];
+        let mut buckets = [0u8;6];
+        let res = validate_sequential(None, &mut tags.iter(), post_tags.as_slice(), &mut buckets);
+        assert_eq!(res.unwrap().tag_id, 10);
+        assert_eq!(buckets, [0,1,2,1,1,0]);
+
+        let mut buckets = [0u8;6];
+        let res = validate_sequential(Some(&tags[0]), &mut tags[1..].iter(), post_tags.as_slice(), &mut buckets);
+        assert_eq!(res.unwrap().tag_id, 10);
+        assert_eq!(buckets, [0,1,2,1,1,0]);
     }
 }
