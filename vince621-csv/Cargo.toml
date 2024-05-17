@@ -14,6 +14,8 @@ vince621-core.path="../vince621-core"
 time = { version = "0.3.34", features = ["parsing", "macros"] }
 rayon = "1.10.0"
 byteyarn = "0.5.1"
+winnow = "0.6.8"
+strum = "0.26.2"
 
 [features]
 phf = ["dep:phf_shared", "dep:phf_generator", "vince621-core/phf"]
