@@ -2,11 +2,11 @@ pub mod tags;
 pub mod posts;
 pub mod pools;
 mod util;
+pub mod html;
 
-use std::{collections::HashMap, io::{BufRead, Read}};
+use std::io::BufRead;
 
 use vince621_core::db::{pools::PoolDatabase, posts::PostDatabase, tags::TagDatabase};
-use winnow::{error::FromExternalError as _, token::{take_till, take_until}, Parser as _};
 
 pub struct E6Database {
     pub tag: TagDatabase,
@@ -110,29 +110,8 @@ pub trait UrlLoader {
     fn load(&self, url: String) -> std::io::Result<impl std::io::BufRead>;
 }
 
-pub struct DateInfo {
-    pub date: Date,
-    pub post_db_size: u64,
-    pub tag_db_size: u64,
-    pub tag_implication_size: u64,
-    pub tag_alias_size: u64,
-    pub wiki_page_size: u64,
-}
 
-impl DateInfo {
-    fn from(date: Date, data: [u64;5])->Self {
-        Self {
-            date,
-            tag_db_size: data[LoadWhat::Tags as usize],
-            post_db_size: data[LoadWhat::Posts as usize],
-            tag_alias_size: data[LoadWhat::TagAliases as usize],
-            tag_implication_size: data[LoadWhat::TagImplications as usize],
-            wiki_page_size: data[LoadWhat::WikiPages as usize],
-        }
-    }
-}
-
-#[derive(Hash,PartialEq,Eq)]
+#[derive(Debug,Hash,PartialEq,Eq)]
 pub struct Date {
     pub year: u16,
     pub month: u8,
@@ -147,67 +126,6 @@ impl<T> Loader for &DateLoader<T> where T: UrlLoader {
     }
 }
 
-pub struct BadHTML(pub &'static str);
-
-
-fn parse_html_row(input: &mut &str) -> winnow::PResult<Option<(Date, LoadWhat, u64)>> {
-    "<a href=\"".parse_next(input)?;
-    let s = take_till(1.., '-').parse_next(input)?;
-
-    let which: LoadWhat = match s.parse() {
-        Ok(x) => x,
-        Err(_) => {
-            // although i find it unlikely, e621 may add more download options in the future.
-            // if this happens, we want to skip them rather than fail, opting not to inform our
-            // caller about CSV files we don't know how to parse.
-            return Ok(None);
-        }
-    };
-    
-    let s = &s[1..];
-
-    let year:u16 = take_till(4..=4,'-').parse_to().parse_next(input)?;
-    let s = &s[1..];
-    let month:u8 = take_till(2..=2,'-').parse_to().parse_next(input)?;
-    let s = &s[1..];
-    let day:u8 = take_till(2..=2,'.').parse_to().parse_next(input)?;
-    let s = &s[1..];
-    
-    let date = Date{year,month,day};
-
-    // winnow is really not built to deal with parsing stuff at the *end* of a string so we have to do this terribleness to convince it to let us use regular str operators.
-    // was using winnow for this a mistake? quite possibly.
-    let last_space_position = s.rfind(' ').ok_or(winnow::error::ErrMode::Backtrack(winnow::error::ContextError::new()))?;
-
-    let s = s[last_space_position..].trim();
-
-    let size = s.parse().map_err(|e| winnow::error::ErrMode::Backtrack(winnow::error::ContextError::from_external_error(&s,winnow::error::ErrorKind::Slice,e)))?;
-
-    Ok(Some((date, which, size)))
-}
-
-pub fn parse_html(html: &str) -> Result<Vec<DateInfo>, BadHTML> {
-    let mut output = HashMap::new();
-    let pos = html.find("\n<a ").ok_or(BadHTML("could not find start of list"))?+1;
-    for line in html[pos..].lines() {
-        if !line.starts_with("<a") {
-            if line.starts_with("</pre>") {
-                return Ok(
-                    output.into_iter()
-                    .map(|(k,v)| DateInfo::from(k,v))
-                    .collect()
-                );
-            }
-        }
-        let mut l2 = line;
-        if let Some((date, which, size)) = parse_html_row(&mut l2).map_err(|_| BadHTML(""))? { 
-            output.entry(date).or_default()[which as usize]=size;
-        }
-    }
-
-    todo!()
-}
-
 pub fn load_tag_database(loader: impl Loader) -> csv::Result<TagDatabase> {
     tags::load_tag_database(csv::Reader::from_reader(flate2::bufread::GzDecoder::new(loader.load(LoadWhat::Tags)?)))
 }
@@ -220,3 +138,4 @@ pub fn load_post_database(tag_db: &TagDatabase, loader: impl Loader) -> csv::Res
 pub fn load_tag_alias_database(loader: impl Loader) -> csv::Result<> {
 }
 */
+

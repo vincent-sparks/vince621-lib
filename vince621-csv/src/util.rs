@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 
 use serde::de::{Deserializer, Unexpected};
-use time::{format_description::well_known::Rfc3339, PrimitiveDateTime};
+use time::{PrimitiveDateTime};
 
 use time::macros::format_description;
 

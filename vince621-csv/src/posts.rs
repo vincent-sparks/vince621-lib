@@ -1,4 +1,4 @@
-use std::{io::Read, num::{NonZeroU16, NonZeroU32}};
+use std::{io::Read, num::{NonZeroU32}};
 
 use vince621_core::db::{posts::{FileExtension, Post, PostDatabase, Rating}, tags::TagDatabase};
 
