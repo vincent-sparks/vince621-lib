@@ -1,8 +1,32 @@
 use super::{Date,LoadWhat};
-use winnow::{error::FromExternalError as _, token::take_till, Parser as _};
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error,Debug)]
+pub enum BadDate {
+    #[error("date must be 10 characters")]
+    WrongLength,
+    #[error("bad integer")]
+    BadInteger(#[from] std::num::ParseIntError),
+}
+
+impl FromStr for Date {
+    type Err=BadDate;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != 10 {
+            return Err(BadDate::WrongLength);
+        }
+        Ok(Self {
+            year: s[0..4].parse()?,
+            month: s[5..7].parse()?,
+            day: s[8..10].parse()?,
+
+        })
+    }
+}
+
+#[derive(Debug,PartialEq,Eq)]
 pub struct DateInfo {
     pub date: Date,
     pub post_db_size: u64,
@@ -10,6 +34,7 @@ pub struct DateInfo {
     pub tag_implication_size: u64,
     pub tag_alias_size: u64,
     pub wiki_page_size: u64,
+    pub pool_db_size: u64,
 }
 
 impl DateInfo {
@@ -18,6 +43,7 @@ impl DateInfo {
             date,
             tag_db_size: data[LoadWhat::Tags as usize],
             post_db_size: data[LoadWhat::Posts as usize],
+            pool_db_size: data[LoadWhat::Pools as usize],
             tag_alias_size: data[LoadWhat::TagAliases as usize],
             tag_implication_size: data[LoadWhat::TagImplications as usize],
             wiki_page_size: data[LoadWhat::WikiPages as usize],
@@ -25,19 +51,29 @@ impl DateInfo {
     }
 }
 
-#[derive(Debug)]
-pub struct BadHTML(pub String);
-
-impl std::error::Error for BadHTML{}
-impl std::fmt::Display for BadHTML {
-    fn fmt(&self,fmt:&mut std::fmt::Formatter)->std::fmt::Result{fmt.write_str(&self.0)}
+#[derive(Debug, thiserror::Error)]
+pub enum BadHTML {
+    #[error("Could not find start of list")]
+    CouldNotFindStartOfList,
+    #[error("Missing prefix on line {0}")]
+    MissingPrefix(String),
+    #[error("MissingHyphenAfterFilename")]
+    MisisngHyphenAfterFilename,
+    #[error("could not find space at end")]
+    CouldNotFindSpaceAtEnd,
+    #[error("could not parse file size: {0}")]
+    CouldNotParseFileSize(String),
+    #[error("bad date {0}")]
+    BadDate(String),
 }
 
-fn parse_html_row(input: &mut &str) -> winnow::PResult<Option<(Date, LoadWhat, u64)>> {
-    "<a href=\"".parse_next(input)?;
-    let s = take_till(1.., '-').parse_next(input)?;
 
-    let which: LoadWhat = match s.parse() {
+// using winnow for this turned out to be more trouble than it's worth.
+fn parse_html_row(mut input: &str) -> Result<Option<(Date, LoadWhat, u64)>, BadHTML> {
+    input = input.strip_prefix("<a href=\"").ok_or_else(|| BadHTML::MissingPrefix(input.into()))?;
+    let (which, input) = input.split_once('-').ok_or(BadHTML::MisisngHyphenAfterFilename)?;
+
+    let which: LoadWhat = match which.parse() {
         Ok(x) => x,
         Err(_) => {
             // although i find it unlikely, e621 may add more download options in the future.
@@ -47,31 +83,22 @@ fn parse_html_row(input: &mut &str) -> winnow::PResult<Option<(Date, LoadWhat, u
         }
     };
     
-    let s = &s[1..];
+    let s = input;
 
-    let year:u16 = take_till(4..=4,'-').parse_to().parse_next(input)?;
-    let s = &s[1..];
-    let month:u8 = take_till(2..=2,'-').parse_to().parse_next(input)?;
-    let s = &s[1..];
-    let day:u8 = take_till(2..=2,'.').parse_to().parse_next(input)?;
-    let s = &s[1..];
-    
-    let date = Date{year,month,day};
+    let date: Date = s[..10].parse().map_err(|_| BadHTML::BadDate(s[..10].to_owned()))?;
 
-    // winnow is really not built to deal with parsing stuff at the *end* of a string so we have to do this terribleness to convince it to let us use regular str operators.
-    // was using winnow for this a mistake? quite possibly.
-    let last_space_position = s.rfind(' ').ok_or(winnow::error::ErrMode::Backtrack(winnow::error::ContextError::new()))?;
+    let last_space_position = s.rfind(' ').ok_or(BadHTML::CouldNotFindSpaceAtEnd)?;
 
     let s = s[last_space_position..].trim();
 
-    let size = s.parse().map_err(|e| winnow::error::ErrMode::Backtrack(winnow::error::ContextError::from_external_error(&s,winnow::error::ErrorKind::Slice,e)))?;
+    let size = s.parse().map_err(|_| BadHTML::CouldNotParseFileSize(s.into()))?;
 
     Ok(Some((date, which, size)))
 }
 
 pub fn parse_html(html: &str) -> Result<Vec<DateInfo>, BadHTML> {
     let mut output = HashMap::new();
-    let pos = html.find("\n<a ").ok_or(BadHTML("could not find start of list".into()))?+1;
+    let pos = html.find("\n<a ").ok_or(BadHTML::CouldNotFindStartOfList)?+1;
     for line in html[pos..].lines() {
         if !line.starts_with("<a") {
             if line.starts_with("</pre>") {
@@ -83,7 +110,7 @@ pub fn parse_html(html: &str) -> Result<Vec<DateInfo>, BadHTML> {
             }
         }
         let mut l2 = line;
-        if let Some((date, which, size)) = parse_html_row(&mut l2).map_err(|e| BadHTML(e.to_string()))? { 
+        if let Some((date, which, size)) = parse_html_row(&mut l2)? { 
             output.entry(date).or_default()[which as usize]=size;
         }
     }
@@ -127,7 +154,44 @@ mod tests {
 <a href="wiki_pages-2024-05-16.csv.gz">wiki_pages-2024-05-16.csv.gz</a>                       16-May-2024 07:45            11193931
 </pre><hr></body>
 </html>"#);
-        dbg!(res);
-        panic!();
+        assert_eq!(res.unwrap(), vec![
+            DateInfo {
+                date: Date{year:2024,month:05,day:13},
+                post_db_size: 1254849058,
+                pool_db_size: 4421349,
+                tag_db_size: 13360937,
+                tag_alias_size: 1169745,
+                tag_implication_size: 944925,
+                wiki_page_size: 11174249,
+            },
+            DateInfo {
+                date: Date{year:2024,month:05,day:14},
+                post_db_size: 1255514930,
+                pool_db_size: 4423777,
+                tag_db_size: 13367522,
+                tag_alias_size: 1169745,
+                tag_implication_size: 944988,
+                wiki_page_size: 11180404,
+            },
+            DateInfo {
+                date: Date{year:2024,month:05,day:15},
+                post_db_size: 1256193112,
+                pool_db_size: 4425419,
+                tag_db_size: 13372687,
+                tag_alias_size: 1169745,
+                tag_implication_size: 946352,
+                wiki_page_size: 11184731,
+            },
+            DateInfo {
+                date: Date{year:2024,month:05,day:16},
+                post_db_size: 1256621585,
+                pool_db_size: 4427775,
+                tag_db_size: 13376850,
+                tag_alias_size: 1169745,
+                tag_implication_size: 946433,
+                wiki_page_size: 11193931,
+            },
+
+        ]);
     }
 }
