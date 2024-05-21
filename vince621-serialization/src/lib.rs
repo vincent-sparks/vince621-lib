@@ -1,11 +1,11 @@
-pub mod strings;
+//pub mod strings;
 pub mod posts;
 pub mod tags;
 
 use std::io;
 
 pub use posts::{serialize_post_database, deserialize_post_database};
-pub use tags::{serialize_tag_database, deserialize_tag_database};
+pub use tags::{serialize_tag_database, deserialize_tag_database, serialize_tag_and_implication_database, deserialize_tag_and_implication_database};
 
 pub trait Header {
     /// Total number of records to load, used for displaying progress bars.

@@ -12,7 +12,7 @@ brotli = "3.4.0"
 replace_with = "0.1.7"
 byteorder = "1.5.0"
 phf_generator = { version = "0.11.2", optional = true }
-byteyarn = "0.4.1"
+byteyarn = "0.5.1"
 
 [features]
 default=["phf"]

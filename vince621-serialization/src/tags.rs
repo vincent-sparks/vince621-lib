@@ -175,7 +175,7 @@ pub fn deserialize_tag_database(header: TagHeader, file: &mut impl io::BufRead) 
 }
 
 
-pub fn deserialize_tag_and_implication_database(header: TagHeader, file: &mut impl io::BufRead) -> io::Result<TagAndImplicationDatabase> {
+pub fn deserialize_tag_and_implication_database(header: TagHeader, file: &mut (impl io::BufRead+io::Seek)) -> io::Result<TagAndImplicationDatabase> {
     let &TagHeader{version, alias_count, implication_count, ..} = &header;
     let tag_db = deserialize_tag_database(header, &mut *file)?;
     if version==2 || version==3 {
@@ -192,6 +192,7 @@ pub fn deserialize_tag_and_implication_database(header: TagHeader, file: &mut im
             let name = std::str::from_utf8(&v[..idx]).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             let tag_idx = file.read_usize_varint()?;
             aliases.push((Yarn::copy(name), tag_idx));
+            v.clear();
         }
 
         for _ in 0..implication_count {
@@ -210,6 +211,26 @@ pub fn deserialize_tag_and_implication_database(header: TagHeader, file: &mut im
     }
 }
 
-pub fn serialize_tag_and_implication_database(db: &TagAndImplicationDatabase, file: &mut impl io::BufRead) -> io::Result<()> {
+pub fn serialize_tag_and_implication_database(db: &TagAndImplicationDatabase, file: &mut (impl io::Write+io::Seek)) -> io::Result<()> {
+    write_tag_db_header(&mut *file, #[cfg(feature="phf")] db.tags.get_phf(), db.tags.get_all().len(), db.aliases.len(), db.implications.len())?;
+    for tag in db.tags.get_all() {
+        file.write_all(tag.name.as_bytes())?;
+        file.write_all(b"\0")?;
+        file.write_u32_varint(tag.id)?;
+        file.write_u8(tag.category as u8)?;
+        file.write_i32_varint(tag.post_count)?;
+    }
+    for (alias, to) in db.aliases.iter() {
+        file.write_all(alias.as_bytes())?;
+        file.write_all(b"\0")?;
+        file.write_usize_varint(*to)?;
+    }
+    for (antecedent, consequents) in db.implications.iter() {
+        file.write_u32_varint(*antecedent)?;
+        file.write_usize_varint(consequents.len())?;
+        for consequent in consequents {
+            file.write_u32_varint(*consequent)?;
+        }
+    }
     Ok(())
 }

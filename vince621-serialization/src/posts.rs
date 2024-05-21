@@ -1,4 +1,4 @@
-use std::num::{NonZeroU16, NonZeroU32};
+use std::num::{NonZeroU32};
 
 use num_traits::FromPrimitive as _;
 use varint_rs::{VarintReader,VarintWriter};
