@@ -1,4 +1,4 @@
-use std::{num::{NonZeroU16, NonZeroU32}, str::FromStr};
+use std::{num::{NonZeroU32}, str::FromStr};
 
 use hex::ToHex;
 

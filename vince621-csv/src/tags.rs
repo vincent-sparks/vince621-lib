@@ -28,7 +28,7 @@ fn load_implication_or_alias_database<R: Read>(mut rdr: csv::Reader<R>, mut out:
     Ok(())
 }
 
-pub fn load_alias_database<R: Read>(rdr: csv::Reader<R>, tag_db: &TagDatabase) -> csv::Result<Vec<(Yarn, usize)>> {
+pub fn load_alias_database<R: Read>(tag_db: &TagDatabase, rdr: csv::Reader<R>) -> csv::Result<Vec<(Yarn, usize)>> {
     let mut res = Vec::new();
     load_implication_or_alias_database(rdr, |antecedent, consequent| {
         let Some(consequent) = tag_db.get_as_index(consequent) else {return};
@@ -40,7 +40,7 @@ pub fn load_alias_database<R: Read>(rdr: csv::Reader<R>, tag_db: &TagDatabase) -
     Ok(res)
 }
 
-pub fn load_implication_database<R: Read>(rdr: csv::Reader<R>, tag_db: &TagDatabase) -> csv::Result<std::collections::HashMap<u32, Vec<u32>>> {
+pub fn load_implication_database<R: Read>(tag_db: &TagDatabase, rdr: csv::Reader<R>) -> csv::Result<std::collections::HashMap<u32, Vec<u32>>> {
     let mut res = HashMap::<u32, Vec<u32>>::new();
     load_implication_or_alias_database(rdr, |antecedent, consequent| {
         let Some(antecedent) = tag_db.get(antecedent) else {return};

@@ -3,11 +3,11 @@
 /// 
 use winnow::ascii::{space0,digit0,digit1};
 use winnow::error::{ErrMode, ErrorKind, ParserError};
-use winnow::stream::{Offset, Stream};
+
 use winnow::{PResult, Parser};
 use winnow::token::one_of;
-use winnow::combinator::{seq, alt,opt};
-use std::fmt::{Debug,Display};
+use winnow::combinator::{seq,opt};
+use std::fmt::{Debug};
 
 pub mod e6_posts;
 pub mod e6_pools;
@@ -241,7 +241,7 @@ mod test {
     use crate::search::test::why_do_i_have_to_hack_this::TryMapCut;
 
     use super::*;
-    use winnow::combinator::repeat;
+    use winnow::combinator::{alt, repeat};
 
     struct NullKernel;
     impl Kernel for NullKernel {

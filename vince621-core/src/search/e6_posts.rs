@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use winnow::ascii::space0;
 use winnow::combinator::{alt, cut_err, eof, repeat, repeat_till, seq};
-use winnow::error::{AddContext, ContextError, StrContext, TreeError};
+use winnow::error::{AddContext, StrContext};
 use winnow::error::ErrMode;
 use winnow::error::ErrorKind;
 use winnow::error::FromExternalError;
@@ -286,6 +286,7 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + Fro
     }
 }
 
+/*
 #[multiversion::multiversion(targets="simd")]
 fn validate_simd(query_tags: &[SearchedTag], post_tags: &[u32], buckets: &mut [u8]) {
     const width: Option<usize> = multiversion::target::selected_target!().suggested_simd_width::<u32>();
@@ -337,6 +338,7 @@ fn validate_sequential<'a>(initial: Option<&'a SearchedTag>, query_tags: &mut im
         }
     }
 }
+*/
 
 #[inline(always)]
 fn validate_simd_internal<'a, const N: usize>(mut current_tag: &'a SearchedTag, query_tags: &mut impl Iterator<Item=&'a SearchedTag>, post_tags: &[Simd<u32, N>], buckets: &mut [u8]) -> Option<&'a SearchedTag> where LaneCount<N>: SupportedLaneCount {
@@ -403,7 +405,7 @@ impl Kernel for PostKernel {
             }
         }
         // simd validation still has some bugs which i don't feel like fixing rn
-        // and turned out not to be faster so i'm leaving it disabled for now
+        // and turned out not to be faster on my hardware so i'm leaving it disabled
         //validate_simd(&self.tags, &post.tags, buckets);
     }
 }
@@ -646,6 +648,8 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
 
 #[cfg(test)]
 mod test {
+    use winnow::error::ContextError;
+
     use crate::db::posts::Post;
     use crate::db::tags::Tag;
 

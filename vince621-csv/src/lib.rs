@@ -4,7 +4,7 @@ pub mod pools;
 mod util;
 pub mod html;
 
-use std::io::BufRead;
+use std::{collections::HashMap, io::BufRead};
 
 use vince621_core::db::{pools::PoolDatabase, posts::PostDatabase, tags::TagDatabase};
 
@@ -134,8 +134,11 @@ pub fn load_post_database(tag_db: &TagDatabase, loader: impl Loader) -> csv::Res
     posts::load_post_database(tag_db, csv::Reader::from_reader(flate2::bufread::GzDecoder::new(loader.load(LoadWhat::Posts)?)))
 }
 
-/*
-pub fn load_tag_alias_database(loader: impl Loader) -> csv::Result<> {
+pub fn load_tag_alias_database(tag_db: &TagDatabase, loader: impl Loader) -> csv::Result<Vec<(byteyarn::Yarn, usize)>> {
+    tags::load_alias_database(tag_db, csv::Reader::from_reader(flate2::bufread::GzDecoder::new(loader.load(LoadWhat::TagAliases)?)))
 }
-*/
+
+pub fn load_tag_implication_database(tag_db: &TagDatabase, loader: impl Loader) -> csv::Result<HashMap<u32, Vec<u32>>> {
+    tags::load_implication_database(tag_db, csv::Reader::from_reader(flate2::bufread::GzDecoder::new(loader.load(LoadWhat::TagImplications)?)))
+}
 

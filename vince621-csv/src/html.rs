@@ -97,7 +97,7 @@ fn parse_html_row(mut input: &str) -> Result<Option<(Date, LoadWhat, u64)>, BadH
 }
 
 pub fn parse_html(html: &str) -> Result<Vec<DateInfo>, BadHTML> {
-    let mut output = HashMap::new();
+    let mut output = Vec::new();
     let pos = html.find("\n<a ").ok_or(BadHTML::CouldNotFindStartOfList)?+1;
     for line in html[pos..].lines() {
         if !line.starts_with("<a") {
@@ -111,7 +111,20 @@ pub fn parse_html(html: &str) -> Result<Vec<DateInfo>, BadHTML> {
         }
         let mut l2 = line;
         if let Some((date, which, size)) = parse_html_row(&mut l2)? { 
-            output.entry(date).or_default()[which as usize]=size;
+            // poor man's for/else
+            // hate me all you want.  i am a pythonista at heart.
+            'a: {
+                for (k,v) in output.iter_mut() {
+                    if *k==date {
+                        v[which as usize]=size;
+                        break 'a;
+                    }
+                }
+                // else
+                let mut v = [0u64;6];
+                v[which as usize]=size;
+                output.push((date, v));
+            }
         }
     }
 
@@ -169,7 +182,7 @@ mod tests {
                 post_db_size: 1255514930,
                 pool_db_size: 4423777,
                 tag_db_size: 13367522,
-                tag_alias_size: 1169745,
+                tag_alias_size: 1170143,
                 tag_implication_size: 944988,
                 wiki_page_size: 11180404,
             },
@@ -178,7 +191,7 @@ mod tests {
                 post_db_size: 1256193112,
                 pool_db_size: 4425419,
                 tag_db_size: 13372687,
-                tag_alias_size: 1169745,
+                tag_alias_size: 1170668,
                 tag_implication_size: 946352,
                 wiki_page_size: 11184731,
             },
@@ -187,7 +200,7 @@ mod tests {
                 post_db_size: 1256621585,
                 pool_db_size: 4427775,
                 tag_db_size: 13376850,
-                tag_alias_size: 1169745,
+                tag_alias_size: 1170928,
                 tag_implication_size: 946433,
                 wiki_page_size: 11193931,
             },

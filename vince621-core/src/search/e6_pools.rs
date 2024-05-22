@@ -1,6 +1,6 @@
 use winnow::ascii::{digit1, space0};
 use winnow::combinator::{alt, eof, opt, repeat, repeat_till, seq};
-use winnow::error::{ErrMode, ErrorKind, FromExternalError, ParserError, StrContext, TreeError};
+use winnow::error::{ErrMode, ErrorKind, FromExternalError, ParserError, StrContext};
 use winnow::stream::Stream as _;
 use winnow::token::take_until;
 use winnow::{PResult, Parser};
@@ -327,6 +327,8 @@ fn parse_single<'a, E>(db: &TagDatabase, query: &mut &'a str) -> PResult<(Nested
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
+
+    use winnow::error::TreeError;
 
     use super::*;
     use crate::db::{posts::Post, tags::{Tag, TagDatabase}};
