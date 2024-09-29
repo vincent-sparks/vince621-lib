@@ -19,8 +19,7 @@ mod byteyarn_serialize {
         }
 
         fn visit_str<E>(self, s: &str) -> Result<Yarn, E> where E: serde::de::Error {
-            Ok(Yarn::copy(s))
-        }
+            Ok(Yarn::copy(s)) }
         fn visit_string<E>(self, s: String) -> Result<Yarn, E> where E: serde::de::Error {
             Ok(Yarn::from_string(s))
         }
@@ -154,6 +153,10 @@ impl TagDatabase {
     pub fn get_all(&self) -> &[Tag] {
         &self.tags
     }
+    pub fn get_by_id(&self, id: u32) -> Option<&Tag> {
+        // TODO more performant implementation
+        self.tags.iter().filter(|x| x.id==id).next()
+    }
     pub fn get(&self, name: &str) -> Option<&Tag> {
         #[cfg(feature="phf")] {
             let hash = phf_shared::hash(name, &self.map.key);
@@ -245,7 +248,7 @@ impl TagDatabase {
         }
     }
 
-    pub fn autocomplete(&self, partial: &str, max_results: usize, ignore: &[u32]) -> Vec<&Tag> {
+    pub fn autocomplete<'a>(&'a self, partial: &str, max_results: usize, predicate: impl Fn(&'a Tag) -> bool) -> Vec<&Tag> {
         #[repr(transparent)]
         #[derive(Debug)]
         struct PostCountOrderTagWrapper<'a>(&'a Tag);
@@ -269,7 +272,7 @@ impl TagDatabase {
 
         let mut res = BinaryHeap::with_capacity(max_results.saturating_add(1));
         for tag in self.search_raw(partial) {
-            if !ignore.contains(&tag.id) {
+            if predicate(&tag) {
                 res.push(PostCountOrderTagWrapper(tag));
                 if res.len() > max_results {
                     res.pop();
@@ -313,14 +316,14 @@ impl TagAndImplicationDatabase {
         self.tags.get(name)
     }
 
-    pub fn remove_implied_tags<'a>(&self, tags: &'a [Tag]) -> impl Iterator<Item=&'a Tag> {
+    pub fn remove_implied_tags<'a>(&self, tags: &'a [&'a Tag]) -> impl Iterator<Item=&'a Tag> {
         let mut s = std::collections::HashSet::new();
         for tag in tags {
             if let Some(implications) = self.implications.get(&tag.id) {
                 implications.iter().for_each(|tag| {s.insert(*tag);});
             }
         }
-        tags.iter().filter(move |tag| !s.contains(&tag.id))
+        tags.iter().map(|x|*x).filter(move |tag| !s.contains(&tag.id))
     }
 
     pub fn search_raw_aliases<'a,'b>(&'a self, name: &'b str) -> impl Iterator<Item=(&'a Tag, &'a str)> + 'b where 'a:'b {
@@ -330,6 +333,85 @@ impl TagAndImplicationDatabase {
         self.aliases[pos..].iter().take_while(move |(k, _)| k.as_str().starts_with(name)).map(move |(s, idx)| (&self.tags.get_all()[*idx], s.as_str()))
     }
 
+    pub fn search_raw_names<'a,'b>(&'a self, name: &'b str) -> impl Iterator<Item=(&'a Tag, &'a str, bool)> + 'b where 'a:'b {
+        self.tags.search_raw(name).map(|x| (x, x.name.as_str(), false)).chain(self.search_raw_aliases(name).map(|x| (x.0, x.1, true)))
+    }
+
+    // this function is simply copy pasted from the TagDatabase implementation.
+    // I don't like repeating myself like this but I don't really want to turn it into a macro
+    // right now.
+    pub fn search_wildcard<'a>(&'a self, query: &'a str) -> impl Iterator<Item=&'a Tag> + 'a {
+        if let Some(pos) = query.find(['*','?']) {
+            Either::Left(self.search_raw_names(&query[..pos]).filter(move |(_, name, is_alias)| {
+                let mut my_query = &query[pos..];
+                if name.len() < pos {
+                    return false;
+                }
+                let mut my_tag = &name[pos..];
+                while !my_query.is_empty() {
+                    match my_query.as_bytes()[0] {
+                        b'?' => {
+                            my_query = &my_query[1..];
+                            if my_tag.len() == 0 {return false;}
+                            my_tag = &my_tag[my_tag.ceil_char_boundary(1)..];
+                        },
+                        b'*' => {
+                            my_query = &my_query[1..];
+                            // TODO: Come up with a non-stupid way to do this
+                            let disallow_aliases = my_query.starts_with('?');
+                            if disallow_aliases {
+                                if *is_alias {
+                                    return false;
+                                }
+                                my_query = &my_query[1..];
+                            }
+                            let next_pos = my_query.find(['*','?']);
+                            let next_text = next_pos.map(|pos| &my_query[..pos]).unwrap_or(my_query);
+                            if let Some(text_pos) = my_tag.find(next_text) {
+                                my_tag = &my_tag[text_pos+next_text.len()..];
+                                match next_pos {
+                                    Some(pos) => {
+                                        my_query=&my_query[pos..];
+                                    },
+                                    None => {
+                                        // we matched everything after the asterisk, and there
+                                        // are no more wildcards in the query.  if there's
+                                        // more data in the tag after the text we matched,
+                                        // we fail -- the user would've added another * at the end
+                                        // of the query if they meant to include that.  if the
+                                        // query did end with an *, next_text (the text after the
+                                        // asterisk we found) will be empty, and we should succeed.
+                                        return my_tag.is_empty() || next_text.is_empty();
+                                    },
+                                }
+                            } else {
+                                return false;
+                            }
+                        },
+                        _ => {
+                            if let Some(next_pos) = my_query.find(['*','?']) {
+                                if my_tag.len() < next_pos {return false;}
+                                // compare using byte slices rather than string slices, in case
+                                // next_pos happens to not fall on a char boundary when indexed
+                                // into my_tag.
+                                if my_tag.as_bytes()[..next_pos] != my_query.as_bytes()[..next_pos] {return false;}
+                                my_tag = &my_tag[next_pos..];
+                                my_query = &my_query[next_pos..];
+                            } else {
+                                // no more wildcards -- check the entire rest of the string
+                                return my_tag==my_query;
+                            }
+                        }
+                    }
+                }
+                return my_tag.is_empty();
+            }
+            ).map(|x|x.0))
+        } else {
+            // there are no wildcards anywhere in the string.  this means it is a literal token.
+            Either::Right(self.get(query).into_iter())
+        }
+    }
     /**
      *
      * Retrieve a list of tags that begin with the given prefix, including aliases.
@@ -343,7 +425,7 @@ impl TagAndImplicationDatabase {
      * otherwise match.  You can use this, for example, to avoid showing autocomplete results for
      * tags that the user has already typed into the current query.
      */
-    pub fn autocomplete<'a>(&'a self, partial: &str, max_results: usize, ignore: &[u32]) -> Vec<(&'a Tag, Option<&'a str>)> {
+    pub fn autocomplete<'a>(&'a self, partial: &str, max_results: usize, predicate: impl Fn(&'a Tag, Option<&'a str>) -> bool) -> Vec<(&'a Tag, Option<&'a str>)> {
 
         #[derive(Debug)]
         struct PostCountOrderTagWrapper<'a>(&'a Tag, &'a str);
@@ -364,7 +446,7 @@ impl TagAndImplicationDatabase {
             fn eq(&self,other:&Self)->bool{self.0.post_count==other.0.post_count}
         }
 
-        let mut v = self.tags.autocomplete(partial, max_results, ignore).into_iter().map(|x| (x, None)).collect::<Vec<(&'a Tag, Option<&'a str>)>>();
+        let mut v = self.tags.autocomplete(partial, max_results, |tag| predicate(tag, None)).into_iter().map(|x| (x, None)).collect::<Vec<(&'a Tag, Option<&'a str>)>>();
         let offset = v.partition_point(|(tag, _)| tag.post_count!=0);
         if offset < max_results {
             let mut rest = v[offset..].iter().copied().collect::<Vec<_>>();
@@ -373,7 +455,7 @@ impl TagAndImplicationDatabase {
             
             let mut collector = BinaryHeap::with_capacity(remaining.saturating_add(1));
             for (tag, alias) in self.search_raw_aliases(partial) {
-                if !ignore.contains(&tag.id) {
+                if predicate(&tag, Some(alias)) {
                     collector.push(PostCountOrderTagWrapper(tag, alias));
                     if collector.len() > remaining {
                         collector.pop();
@@ -486,10 +568,10 @@ mod test {
             },
         ].into());
 
-        assert_eq!(tag_db.autocomplete("ab", 6, &[]).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,6,5]);
-        assert_eq!(tag_db.autocomplete("ab", 4, &[]).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,6]);
-        assert_eq!(tag_db.autocomplete("ab", 3, &[]).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2]);
-        assert_eq!(tag_db.autocomplete("ab", 2, &[]).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1]);
+        assert_eq!(tag_db.autocomplete("ab", 6, |_| true).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,6,5]);
+        assert_eq!(tag_db.autocomplete("ab", 4, |_| true).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2,6]);
+        assert_eq!(tag_db.autocomplete("ab", 3, |_| true).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1,2]);
+        assert_eq!(tag_db.autocomplete("ab", 2, |_| true).iter().map(|i|i.id).collect::<Vec<_>>(), [3,1]);
 
         let ac = tag_db.get_as_index("ac").unwrap();
 
@@ -497,10 +579,10 @@ mod test {
             (Yarn::from_static("abq"),ac),
         ]);
 
-        assert_eq!(tag_and_alias_db.autocomplete("ab", 6, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6,4,5]);
-        assert_eq!(tag_and_alias_db.autocomplete("ab", 5, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6,4]);
-        assert_eq!(tag_and_alias_db.autocomplete("ab", 4, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6]);
-        assert_eq!(tag_and_alias_db.autocomplete("ab", 3, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 6, |_,_| true).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6,4,5]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 5, |_,_| true).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6,4]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 4, |_,_| true).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2,6]);
+        assert_eq!(tag_and_alias_db.autocomplete("ab", 3, |_,_| true).iter().map(|i|i.0.id).collect::<Vec<_>>(), [3,1,2]);
 
         let abd = tag_and_alias_db.tags.get_as_index("abd").unwrap();
         let abc = tag_and_alias_db.tags.get_as_index("abc").unwrap();
@@ -510,8 +592,8 @@ mod test {
             (Yarn::from_static("aca"),abc),
         ]);
 
-        assert_eq!(tag_and_alias_db.autocomplete("ac", 6, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [4,1,2]);
-        assert_eq!(tag_and_alias_db.autocomplete("ac", 2, &[]).iter().map(|i|i.0.id).collect::<Vec<_>>(), [4,1]);
+        assert_eq!(tag_and_alias_db.autocomplete("ac", 6, |_,_| true).iter().map(|i|i.0.id).collect::<Vec<_>>(), [4,1,2]);
+        assert_eq!(tag_and_alias_db.autocomplete("ac", 2, |_,_| true).iter().map(|i|i.0.id).collect::<Vec<_>>(), [4,1]);
 
     }
 }

@@ -1,4 +1,4 @@
-use std::{num::{NonZeroU32}, str::FromStr};
+use std::{num::NonZeroU32, str::FromStr};
 
 use hex::ToHex;
 
@@ -148,6 +148,10 @@ impl PostDatabase {
     
     pub fn get_all(&self) -> &[Post] {
         &self.posts
+    }
+
+    pub(crate) fn get_by_id(&self, id: std::num::NonZeroU32) -> Option<&Post> {
+        self.posts.binary_search_by(|post| post.id.cmp(&id)).ok().map(|idx| &self.posts[idx])
     }
 }
 

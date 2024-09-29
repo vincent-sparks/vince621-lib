@@ -11,11 +11,11 @@ flate2 = { version = "1.0.28", features = ["zlib-ng"], default-features = false 
 phf_generator = {version="0.11.2", optional=true}
 phf_shared = {version="0.11.2", optional=true}
 vince621-core.path="../vince621-core"
-time = { version = "0.3.34", features = ["parsing", "macros"] }
 rayon = "1.10.0"
 byteyarn = "0.5.1"
 strum = "0.26.2"
 thiserror = "1.0.60"
+chrono = { version = "0.4.38", default-features = false }
 
 [features]
 phf = ["dep:phf_shared", "dep:phf_generator", "vince621-core/phf"]

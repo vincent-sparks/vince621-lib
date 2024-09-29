@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use winnow::ascii::{digit1, space0};
 use winnow::combinator::{alt, eof, opt, repeat, repeat_till, seq};
 use winnow::error::{ErrMode, ErrorKind, FromExternalError, ParserError, StrContext};
@@ -6,7 +8,7 @@ use winnow::token::take_until;
 use winnow::{PResult, Parser};
 
 use crate::db::pools::Pool;
-use crate::db::posts::PostDatabase;
+use crate::db::posts::{Post, PostDatabase};
 use crate::db::tags::TagDatabase;
 
 use super::{Kernel, NestedQuery, NestedQueryParser};
@@ -86,14 +88,57 @@ impl<'b> Kernel for PoolKernel<'b> {
     type Post =  Pool;
 
     fn validate(&self, pool: &Pool, buckets: &mut [u8]) {
+        self.validate(pool.iter_posts(self.post_db), buckets, false);
+    }
+}
+
+struct PostChildSequenceKernel<'b>(pub PoolKernel<'b>);
+
+impl<'b> Kernel for PostChildSequenceKernel<'b> {
+    type Post = Post;
+    fn validate(&self, post: &Post, buckets: &mut [u8]) {
+        struct PostChildSequence<'a>{
+            db: &'a PostDatabase,
+            next: Option<&'a Post>,
+            seen: Vec<NonZeroU32>,
+        }
+
+        impl<'a> Iterator for PostChildSequence<'a> {
+            type Item=&'a Post;
+            fn next(&mut self) -> Option<&'a Post> {
+                let current = self.next;
+                self.next = current
+                    .and_then(|post| post.parent_id)
+                    .and_then(|id| self.db.get_by_id(id))
+                    .filter(|post| !self.seen.contains(&post.id));
+
+                if let Some(n) = self.next {
+                    self.seen.push(n.id);
+                }
+                current
+            }
+        }
+
+        self.0.validate(PostChildSequence{db: self.0.post_db, next: Some(post), seen: vec![post.id]}, buckets, true)
+    }
+}
+
+impl<'b> PoolKernel<'b> {
+    fn validate<'p>(&self, posts: impl Iterator<Item=&'p Post> + 'p, buckets: &mut [u8], reverse: bool) {
         struct CounterState<'a> {
             counter: &'a Counter,
             count: usize,
             target_bucket: usize,
         }
+        let mut tally = 0usize;
         let mut counters = self.data.counters.iter().map(|(counter, target_bucket)| CounterState{counter, target_bucket: *target_bucket, count: 0}).collect::<Vec<_>>();
         let mut sequences = self.data.sequences.iter().map(|(steps, bucket)| (Peeker::new(steps.iter()), bucket)).collect::<Vec<_>>();
-        for post in pool.iter_posts(self.post_db) {
+        if reverse {
+            counters.reverse();
+            sequences.reverse();
+        }
+        for post in posts {
+            tally += 1;
             for counter in counters.iter_mut() {
                 if counter.counter.query.validate(&post) {
                     counter.count += 1;
@@ -127,8 +172,8 @@ impl<'b> Kernel for PoolKernel<'b> {
             */
         }
         for counter in counters {
-            let min = counter.counter.min.resolve(pool.post_ids.len());
-            let max = counter.counter.max.resolve(pool.post_ids.len());
+            let min = counter.counter.min.resolve(tally);
+            let max = counter.counter.max.resolve(tally);
             if counter.count >= min && counter.count <= max {
                 buckets[counter.target_bucket]+=1;
             }
@@ -182,7 +227,7 @@ fn parse_counter_bound<'a, E>(input: &mut &'a str) -> PResult<CounterBound, E> w
     }
 }
 
-pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, query: &'a str) -> Result<NestedQuery<PoolKernel<'db>>, ExternalError<'a>> {
+pub fn parse_query<'a, 'db>(mut parse_tag: impl FnMut(&'a str) -> Vec<u32>, post_db: &'db PostDatabase, query: &'a str) -> Result<NestedQuery<PoolKernel<'db>>, ExternalError<'a>> {
     let mut nqp = NestedQueryParser::<()>::new();
 
     let mut counters = Vec::new();
@@ -233,7 +278,7 @@ pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, qu
             BracketKind::Sequence => {
                 
                let v: Vec<_> = repeat(1.., 
-                       |input: &mut &'a str| parse_single(tag_db, input),
+                       |input: &mut &'a str| parse_single(&mut parse_tag, input),
                ).parse(input2).map_err(|e|e.into_inner())?;
 
                sequences.push((v.into_iter().map(|(query, terminator)| SequenceStep{query, allow_next_step_on_same_post: match terminator {
@@ -243,7 +288,7 @@ pub fn parse_query<'a, 'db>(tag_db: &TagDatabase, post_db: &'db PostDatabase, qu
                }}).collect(), nqp.get_current_bucket(0)));
             },
             BracketKind::Single(start, end) => {
-                let query = super::e6_posts::parse_query(&tag_db, input2).map_err(ErrMode::Cut)?;
+                let query = super::e6_posts::parse_query(&mut parse_tag, input2).map_err(ErrMode::Cut)?;
                 counters.push((Counter {
                     query, min: start, max: end
                 }, nqp.get_current_bucket(0)));
@@ -304,8 +349,8 @@ enum Terminator {
     Eof,
 }
 
-fn parse_single<'a, E>(db: &TagDatabase, query: &mut &'a str) -> PResult<(NestedQuery<PostKernel>, Terminator), E> where E: ParserError<&'a str> + FromExternalError<&'a str, super::ParseError> + FromExternalError<&'a str, super::e6_posts::BadTag>{
-    let mut parser = TagQueryParser::new(db);
+fn parse_single<'a, E>(parse_tag: &mut impl FnMut(&'a str) -> Vec<u32>, query: &mut &'a str) -> PResult<(NestedQuery<PostKernel>, Terminator), E> where E: ParserError<&'a str> + FromExternalError<&'a str, super::ParseError> + FromExternalError<&'a str, super::e6_posts::BadTag>{
+    let mut parser = TagQueryParser::new(parse_tag);
     let parser_ref = &mut parser;
 
     let ((), terminator) = repeat_till(1..,
@@ -347,14 +392,15 @@ mod tests {
         ]));
         let s = "a b > c d |> e f";// ] g h";
         let cursor = &mut &*s;
-        let (parsed, terminator) = parse_single::<TreeError<_>>(&db, cursor).unwrap();
+        let mut search_func = |s| db.get(s).map(|tag| tag.id).into_iter().collect::<Vec<u32>>();
+        let (parsed, terminator) = parse_single::<TreeError<_>>(&mut search_func, cursor).unwrap();
         assert_eq!(terminator, Terminator::Greater);
-        let (parsed, terminator) = parse_single::<TreeError<_>>(&db, cursor).unwrap();
+        let (parsed, terminator) = parse_single::<TreeError<_>>(&mut search_func, cursor).unwrap();
         assert_eq!(terminator, Terminator::PipeGreater);
         //let (parsed, terminator) = parse_single::<TreeError<_>>(&db, cursor).unwrap();
         //assert_eq!(terminator, Terminator::CloseSquare);
         assert_eq!(cursor.trim(), "e f");
-        let (parsed, terminator) = parse_single::<TreeError<_>>(&db, cursor).unwrap();
+        let (parsed, terminator) = parse_single::<TreeError<_>>(&mut search_func, cursor).unwrap();
         assert_eq!(terminator, Terminator::Eof);
     }
 
@@ -390,7 +436,8 @@ mod tests {
             post(6, &[3,4]),
         ]));
 
-        let validator = parse_query(&tag_db, &post_db, "[a |> b > c > d]").unwrap();
+        let search_func = |s| tag_db.get(s).map(|tag| tag.id).into_iter().collect::<Vec<u32>>();
+        let validator = parse_query(search_func, &post_db, "[a |> b > c > d]").unwrap();
 
         assert!(validator.validate(&Pool::debug_default([1,2,4,5])));
         assert!(validator.validate(&Pool::debug_default([1,2,1,4,5])));
@@ -417,13 +464,14 @@ mod tests {
             post(6, &[3,4]),
         ]));
 
-        let validator = parse_query(&tag_db, &post_db, "2-3[ a ]").unwrap();
+        let search_func = |s| tag_db.get(s).map(|tag| tag.id).into_iter().collect::<Vec<u32>>();
+        let validator = parse_query(search_func, &post_db, "2-3[ a ]").unwrap();
 
         assert!(validator.validate(&Pool::debug_default([2,2,1,2,1,2,2])));
         assert!(!validator.validate(&Pool::debug_default([2,2,1,2,1,2,2,1,1])));
         assert!(validator.validate(&Pool::debug_default([2,2,1,2,3,2,2])));
 
-        let validator = parse_query(&tag_db, &post_db, "50%-[ a ]").unwrap();
+        let validator = parse_query(search_func, &post_db, "50%-[ a ]").unwrap();
 
         assert!(validator.validate(&Pool::debug_default([2,2,1,2,1,1])));
         assert!(!validator.validate(&Pool::debug_default([2,2,1,2,2,1])));

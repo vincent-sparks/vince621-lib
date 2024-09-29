@@ -1,9 +1,10 @@
 use std::num::NonZeroU32;
 
-use time::PrimitiveDateTime;
+use chrono::{DateTime, Utc};
 
 use super::posts::{Post, PostDatabase};
 
+#[derive(Debug,PartialEq)]
 pub enum PoolCategory {
     Series, Collection
 }
@@ -14,7 +15,7 @@ pub struct Pool {
     pub description: Option<Box<str>>,
     pub category: PoolCategory,
     pub is_active: bool,
-    pub last_updated: PrimitiveDateTime,
+    pub last_updated: DateTime<Utc>,
     pub post_ids: Box<[NonZeroU32]>,
 }
 
@@ -31,7 +32,7 @@ impl Pool {
             description: None,
             category: PoolCategory::Series,
             is_active: false,
-            last_updated: time::OffsetDateTime::UNIX_EPOCH.date().midnight(),
+            last_updated: DateTime::UNIX_EPOCH,
             post_ids: post_ids.into_iter().map(|id| NonZeroU32::new(id).unwrap()).collect(),
         }
     }
@@ -88,15 +89,17 @@ impl<'pool, 'db> Iterator for PoolPostsIter<'pool, 'db> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.post_ids.size_hint()
+        (0, self.post_ids.size_hint().1)
     }
 }
 
+/*
 impl ExactSizeIterator for PoolPostsIter<'_,'_> {
     fn len(&self) -> usize {
         self.post_ids.len()
     }
 }
+*/
 
 pub struct PoolDatabase {
     pools: Box<[Pool]>,

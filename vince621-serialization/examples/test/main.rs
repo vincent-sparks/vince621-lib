@@ -21,11 +21,15 @@ fn main() -> io::Result<()> {
     let implication_db_file = BufReader::new(File::open("tag_implications.csv.gz")?);
     let implication_db = vince621_csv::load_tag_implication_database(&tag_db, vince621_csv::AlreadyLoaded(implication_db_file))?;
     
-    println!("loading implications");
+    println!("loading aliases");
     let alias_db_file = BufReader::new(File::open("tag_aliases.csv.gz")?);
     let alias_db = vince621_csv::load_tag_alias_database(&tag_db, vince621_csv::AlreadyLoaded(alias_db_file))?;
 
     let tag_db = TagAndImplicationDatabase::new(tag_db, implication_db, alias_db);
+
+    println!("loading pools");
+    let pool_db_file = BufReader::new(File::open("pools.csv.gz")?);
+    let pool_db = vince621_csv::load_pool_database(vince621_csv::AlreadyLoaded(pool_db_file))?;
     
     let f = std::fs::OpenOptions::new()
         .create(true)
@@ -100,6 +104,35 @@ fn main() -> io::Result<()> {
 
     println!("{} posts have no width", post_db.get_all().iter().filter(|x| x.width==0).count());
     println!("{} posts have no height", post_db.get_all().iter().filter(|x| x.height==0).count());
+
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open("pools.v621")?;
+
+    let t1 = Instant::now();
+    let mut f2 = BufWriter::new(f);
+    vince621_serialization::serialize_pool_database(pool_db.get_all(), &mut f2)?;
+    let t2 = Instant::now();
+    println!("pool serialize done -- it took {:?}", t2-t1);
+    let f = f2.into_inner().unwrap();
+    let mut f = BufReader::new(f);
+    f.seek(io::SeekFrom::Start(0))?;
+    let db2 = vince621_serialization::deserialize_pool_database(&mut f)?;
+    println!("pool serialize done -- it took {:?}", t2.elapsed());
+
+    for (p1, p2) in pool_db.get_all().iter().zip(db2.get_all()) {
+        assert_eq!(p1.id,p2.id);
+        assert_eq!(p1.name, p2.name);
+        assert_eq!(p1.description, p2.description);
+        assert_eq!(p1.is_active, p2.is_active);
+        assert_eq!(p1.category, p2.category);
+        assert_eq!(p1.last_updated, p2.last_updated);
+        assert_eq!(p1.post_ids, p2.post_ids);
+    }
+
 
     Ok(())
 }

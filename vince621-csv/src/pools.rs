@@ -1,7 +1,6 @@
 use std::num::NonZeroU32;
 use vince621_core::db::pools::{Pool,PoolCategory,PoolDatabase};
-
-use time::PrimitiveDateTime;
+use chrono::{DateTime,Utc};
 
 // this code is *not* well engineered
 // it is ugly af but works
@@ -34,7 +33,7 @@ struct CSVPool {
     name: Box<str>,
     description: Box<str>,
     #[serde(deserialize_with="crate::util::e621_date")]
-    updated_at: PrimitiveDateTime,
+    updated_at: DateTime<Utc>,
 
     #[serde(deserialize_with="category")]
     category: PoolCategory,

@@ -142,3 +142,6 @@ pub fn load_tag_implication_database(tag_db: &TagDatabase, loader: impl Loader) 
     tags::load_implication_database(tag_db, csv::Reader::from_reader(flate2::bufread::GzDecoder::new(loader.load(LoadWhat::TagImplications)?)))
 }
 
+pub fn load_pool_database(loader: impl Loader) -> csv::Result<PoolDatabase> {
+    pools::load_pool_database(csv::Reader::from_reader(flate2::bufread::GzDecoder::new(loader.load(LoadWhat::Pools)?)))
+}

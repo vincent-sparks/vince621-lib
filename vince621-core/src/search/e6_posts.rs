@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::simd::cmp::{SimdPartialEq as _, SimdPartialOrd as _};
 use std::simd::{LaneCount, Simd, SupportedLaneCount};
 use std::str::FromStr;
@@ -15,7 +16,6 @@ use winnow::Parser;
 use winnow::prelude::*;
 
 use crate::db::posts::{self, Post, Rating};
-use crate::db::tags::TagDatabase;
 
 use super::{NestedQueryParser, Kernel};
 use super::NestedQuery;
@@ -38,16 +38,16 @@ pub struct PostKernel {
     ratings: [Vec<usize>; 3],
 }
 
-pub(crate) struct TagQueryParser<'a> {
-    db: &'a TagDatabase,
+pub(crate) struct TagQueryParser<T> {
+    mapper_func: T,
     tags: Vec<SearchedTag>,
     ratings: [Vec<usize>; 3],
     nested_query: NestedQueryParser<StackFrameData>,
 }
-impl<'a> TagQueryParser<'a> {
-    pub fn new(db: &'a TagDatabase) -> Self {
+impl<'a,T> TagQueryParser<T> where T: FnMut(&'a str) -> Vec<u32> {
+    pub fn new(mapper_func: T) -> Self {
         Self {
-            db,
+            mapper_func,
             tags: Vec::new(),
             nested_query: NestedQueryParser::new(),
             ratings: [Vec::new(), Vec::new(), Vec::new()],
@@ -174,7 +174,7 @@ impl std::fmt::Display for BadTag {
 
 impl std::error::Error for BadTag {}
 
-impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + FromExternalError<&'a str, super::ParseError>> Parser<&'a str, (), E> for TagQueryParser<'db> {
+impl<'a, 'db, T: FnMut(&'a str) -> Vec<u32>, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + FromExternalError<&'a str, super::ParseError>> Parser<&'a str, (), E> for TagQueryParser<T> {
     fn parse_next(&mut self, input: &mut &'a str) -> PResult<(), E> {
         let checkpoint = input.checkpoint();
         match self.nested_query.parse_next(input) {
@@ -268,9 +268,9 @@ impl<'a, 'db, E: ParserError<&'a str> + FromExternalError<&'a str, BadTag> + Fro
                         }
                     }
                 }
-                for tag in self.db.search_wildcard(token) {
+                for tag_id in (self.mapper_func)(token) {
                     found_any = true;
-                    self.tags.push(SearchedTag {tag_id: tag.id, bucket: self.nested_query.get_current_bucket(slot)});
+                    self.tags.push(SearchedTag {tag_id, bucket: self.nested_query.get_current_bucket(slot)});
                     self.nested_query.increment_count(slot, 1);
                 }
                 if found_any {
@@ -294,7 +294,7 @@ fn validate_simd(query_tags: &[SearchedTag], post_tags: &[u32], buckets: &mut [u
 
     let mut query_tags = query_tags.iter();
     match width {
-        Some(w)=> {
+        Some(_)=> {
             let (start, simd, end) = post_tags.as_simd::<real_width>();
             let next_tag = validate_sequential(None, &mut query_tags, start, &mut *buckets);
             let current_tag = match next_tag {
@@ -338,7 +338,6 @@ fn validate_sequential<'a>(initial: Option<&'a SearchedTag>, query_tags: &mut im
         }
     }
 }
-*/
 
 #[inline(always)]
 fn validate_simd_internal<'a, const N: usize>(mut current_tag: &'a SearchedTag, query_tags: &mut impl Iterator<Item=&'a SearchedTag>, post_tags: &[Simd<u32, N>], buckets: &mut [u8]) -> Option<&'a SearchedTag> where LaneCount<N>: SupportedLaneCount {
@@ -358,10 +357,12 @@ fn validate_simd_internal<'a, const N: usize>(mut current_tag: &'a SearchedTag, 
         }
     }
 }
+*/
 
 impl Kernel for PostKernel {
     type Post = posts::Post;
 
+    #[inline]
     fn validate(&self, post: &Self::Post, buckets: &mut [u8]) {
         for item in self.ratings[post.rating as usize].iter() {
             buckets[*item] += 1;
@@ -483,8 +484,8 @@ impl<'a> ExternalError<'a> {
     }
 }
 
-pub fn parse_query<'a>(db: &TagDatabase, query: &'a str) -> Result<NestedQuery<PostKernel>, ExternalError<'a>> {
-    let mut tag_parser = TagQueryParser::new(db);
+pub fn parse_query<'a>(parse_tag: impl FnMut(&'a str) -> Vec<u32>, query: &'a str) -> Result<NestedQuery<PostKernel>, ExternalError<'a>> {
+    let mut tag_parser = TagQueryParser::new(parse_tag);
     let tag_parser_ref = &mut tag_parser;
     repeat(0..,
            seq!(
@@ -495,8 +496,8 @@ pub fn parse_query<'a>(db: &TagDatabase, query: &'a str) -> Result<NestedQuery<P
     tag_parser.finalize().map_err(|e| ExternalError::from_external_error(&&query[query.len()..], ErrorKind::Eof, e))
 }
 
-pub fn parse_query_and_sort_order<'a>(db: &TagDatabase, query: &'a str) -> Result<(NestedQuery<PostKernel>, SortOrder), ExternalError<'a>> {
-    let mut tag_parser = TagQueryParser::new(db);
+pub fn parse_query_and_sort_order<'a>(parse_tag: impl FnMut(&'a str) -> Vec<u32>, query: &'a str) -> Result<(NestedQuery<PostKernel>, SortOrder), ExternalError<'a>> {
+    let mut tag_parser = TagQueryParser::new(parse_tag);
     let mut sort_order_parser = SortOrderParser::new();
     let tag_parser_ref = &mut tag_parser;
     let sort_order_parser_ref = &mut sort_order_parser;
@@ -519,7 +520,8 @@ fn range_to_range_inclusive<T>(arg: std::ops::Range<T>) -> std::ops::RangeInclus
 
 /// Parse a partial query that the user is currently editing, and return the token the cursor is in
 /// the middle of, as well as all the tokens in the same bucket as that token or an ancestor.  
-pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usize) -> Option<(&'a str, Vec<&'a str>)> {
+pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usize) -> Option<(Range<usize>, usize, Vec<&'a str>)> {
+    let orig_query = query;
     assert!(cursor_position <= query.len());
     let cursor_ptr = query.as_bytes().as_ptr().wrapping_add(cursor_position);
     let mut nested_parser = NestedQueryParser::<Vec<&'a str>>::new();
@@ -534,7 +536,7 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
             Err(ErrMode::Backtrack(_)) => {
                 query.reset(&checkpoint);
                 let end_pos = query.find([' ','}']).unwrap_or(query.len());
-                let token = &query[..end_pos];
+                let mut token = &query[..end_pos];
                 query = &query[end_pos..];
                 let did_we_find_it = range_to_range_inclusive(token.as_bytes().as_ptr_range()).contains(&cursor_ptr);
                 if did_we_find_it {
@@ -572,7 +574,7 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
                     // all tokens that are attached to either the bucket the cursor is in or one of
                     // its direct ancestors, but no other buckets.
 
-                    'a: while !query.is_empty() {
+                    while !query.is_empty() {
                         // these two variables are bounds of a region we will not parse, both ends
                         // inclusive.
                         let mut start_of_discarded_region = query.find(['{','}']);
@@ -627,7 +629,16 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
                     // put any remaining tokens in the query into the list.
                     query.split(' ').filter(|x|!x.is_empty()).for_each(|token| ancestors.push(token));
 
-                    return Some((token, ancestors));
+                    if token.starts_with('-') || token.starts_with('~') {
+                        token = &token[1..];
+                    }
+                    let range_start = unsafe {token.as_ptr().offset_from(orig_query.as_ptr())} as usize;
+                    // cursor_pos as computed here may be -1 if the cursor is on the character
+                    // before a - sign.  i'm on the fence about whether to return a result at all
+                    // in that case, but for now i will.
+                    let cursor_pos = cursor_position.saturating_sub(range_start);
+                    let range = Range {start: range_start, end: range_start + token.len()};
+                    return Some((range, cursor_pos, ancestors));
                 } else {
                     nested_parser.get_data().push(token);
                 }
@@ -639,8 +650,10 @@ pub fn parse_query_for_autocomplete<'a>(mut query: &'a str, cursor_position: usi
 
     // if we reach the end of the string without hitting a token, and the cursor is also at the end
     // of the string, return the empty string and an empty list of children.
+    //
+    // XXX should we do this?
     if query.is_empty() && cursor_is_at_end {
-        return Some((query, vec![]));
+        return Some((Range{start: orig_query.len(), end: orig_query.len()}, 0, vec![]));
     }
 
     None
@@ -651,11 +664,11 @@ mod test {
     use winnow::error::ContextError;
 
     use crate::db::posts::Post;
-    use crate::db::tags::Tag;
+    use crate::db::tags::{Tag, TagDatabase};
 
     use super::*;
     #[test]
-    fn test_tag_query() {
+    fn test_wildcard() {
         let tag_db = TagDatabase::new([
             Tag::new_debug("a", 1),
             Tag::new_debug("aa", 2),
@@ -664,7 +677,8 @@ mod test {
             Tag::new_debug("abc", 5),
             Tag::new_debug("d", 6),
         ].into());
-        let query = parse_query(&tag_db, "1-{a*}d").unwrap();
+        let search_func = |s| tag_db.search_wildcard(s).map(|tag| tag.id).collect::<Vec<u32>>();
+        let query = parse_query(search_func, "1-{a*}d").unwrap();
         dbg!(&query);
         assert!(query.validate(&Post {
             tags: Box::from([2,3,4,6]),
@@ -677,7 +691,8 @@ mod test {
         let db = TagDatabase::new(vec![
             Tag::new_debug("a", 1),
         ].into());
-        let validator = parse_query(&db, "a 0{ a }").unwrap();
+        let search_func = |s| db.search_wildcard(s).map(|tag| tag.id).collect::<Vec<u32>>();
+        let validator = parse_query(search_func, "a 0{ a }").unwrap();
         let (buckets, validator) = validator.into_inner();
         let mut a = [0u8;2];
         let post = Post {
@@ -691,7 +706,7 @@ mod test {
     }
 
     #[test]
-    fn test_sort_order() {
+    fn test_parse_sort_order() {
         let mut sort_order_parser = SortOrderParser::new();
         let e: PResult<_, ContextError> = sort_order_parser.parse_peek("abcde");
         assert!(matches!(e.unwrap_err(), ErrMode::Backtrack(_)));
@@ -706,11 +721,12 @@ mod test {
             Tag::new_debug("order:favcount_asc", 4),
         ].into());
 
-        let res = parse_query_and_sort_order(&tag_db, "a b c").unwrap();
+        let search_func = |s| tag_db.search_wildcard(s).map(|tag| tag.id).collect::<Vec<u32>>();
+        let res = parse_query_and_sort_order(search_func, "a b c").unwrap();
         assert_eq!(res.0.kernel.tags.iter().map(|x|x.tag_id).collect::<Vec<_>>(), vec![1,2,3]);
         assert_eq!(res.1, SortOrder::Date);
 
-        let res = parse_query_and_sort_order(&tag_db, "a b order:favcount_asc c").unwrap();
+        let res = parse_query_and_sort_order(search_func, "a b order:favcount_asc c").unwrap();
         dbg!(&res.0);
         assert_eq!(res.0.kernel.tags.iter().map(|x|x.tag_id).collect::<Vec<_>>(), vec![1,2,3]);
         assert_eq!(res.1, SortOrder::FavCountAscending);
@@ -721,13 +737,13 @@ mod test {
         // TODO make it so that nested all{ and 1-{ are treated as a single bucket.
         let s = "yes1 all{ yes2 1-{ no1 } all{no2} yes3$ yes4  yes5   all{no3 all{ no4 } } yes6 } yes7 all{ no4}1-{no5} 1-{no6 1-{no7}}yes8";
         let pos = s.find('$').unwrap()+1;
-        let (token, others) = parse_query_for_autocomplete(s, pos).unwrap();
-        assert_eq!(token, "yes3$");
+        let (token_range, cursor_idx, others) = parse_query_for_autocomplete(s, pos).unwrap();
+        assert_eq!(&s[token_range], "yes3$");
         assert_eq!(others, vec!["yes1","yes2","yes4","yes5","yes6","yes7", "yes8"]);
         println!("passed the first test!");
         let pos = s.len();
-        let (token, others) = parse_query_for_autocomplete(s, pos).unwrap();
-        assert_eq!(token,"yes8");
+        let (token_range, cursor_idx, others) = parse_query_for_autocomplete(s, pos).unwrap();
+        assert_eq!(&s[token_range],"yes8");
         assert_eq!(others,vec!["yes1","yes7"]);
         println!("passed the second test!");
         // if the cursor is positioned on a nested query token (curly brace) we should return None
@@ -740,18 +756,25 @@ mod test {
     fn test_autocomplete_starts_with_number() {
         let s = "a b 3c 4d";
         let pos = s.find('3').unwrap();
-        let (token, others) = parse_query_for_autocomplete(s, pos).unwrap();
-        assert_eq!(token, "3c");
+        let (token_range, cursor_offset, others) = parse_query_for_autocomplete(s, pos).unwrap();
+        assert_eq!(cursor_offset, 0);
+        assert_eq!(&s[token_range], "3c");
         assert_eq!(others, vec!["a","b","4d"]);
     }
 
     #[test]
     fn test_autocomplete_empty_string() {
-        assert_eq!(parse_query_for_autocomplete("", 0), Some(("",vec![])));
-        assert_eq!(parse_query_for_autocomplete("a ", 2), Some(("",vec!["a"])));
+        assert_eq!(parse_query_for_autocomplete("", 0), Some((0..0, 0, vec![])));
+        assert_eq!(parse_query_for_autocomplete("a ", 2), Some((2..2, 0, vec!["a"])));
         //assert_eq!(parse_query_for_autocomplete("a  b", 2), Some(("",vec!["a","b"])));
     }
 
+    // this test suite is commented out because the code it tests is commented out
+    // the code it tests is commented out because it does not work correctly even though the tests
+    // pass, and i do not feel like figuring out why, and because we have other code that does work
+    // that does the same job and at least in my testing is just as fast as the simd approach.
+    // CPU really does not seem to be the bottleneck when searching -- the OS does.
+    /*
     #[test]
     fn test_validate_simd() {
         use super::SearchedTag;
@@ -792,9 +815,15 @@ mod test {
         assert_eq!(res.unwrap().tag_id, 10);
         assert_eq!(buckets, [0,1,2,1,1,0]);
 
-        let mut buckets = [0u8;6];
-        let res = validate_sequential(Some(&tags[0]), &mut tags[1..].iter(), post_tags.as_slice(), &mut buckets);
-        assert_eq!(res.unwrap().tag_id, 10);
-        assert_eq!(buckets, [0,1,2,1,1,0]);
+        //let mut buckets = [0u8;6];
+        let res = validate_sequential(res, &mut tags[1..].iter(), [11].as_slice(), &mut buckets);
+        assert_eq!(buckets, [0,1,2,1,1,1]);
     }
+    */
+
+    /*
+    #[test]
+    fn test_validate() {
+    }
+    */
 }
