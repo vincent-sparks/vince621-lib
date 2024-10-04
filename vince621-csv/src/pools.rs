@@ -41,7 +41,7 @@ struct CSVPool {
     #[serde(deserialize_with="crate::util::t_or_f")]
     is_active: bool,
     #[serde(deserialize_with="crate::util::bracketed_list")]
-    post_ids: Box<[NonZeroU32]>,
+    post_ids: Box<[u32]>,
 }
 
 impl From<CSVPool> for Pool {
@@ -53,7 +53,7 @@ impl From<CSVPool> for Pool {
             is_active: me.is_active,
             last_updated: me.updated_at,
             category: me.category,
-            post_ids: me.post_ids,
+            post_ids: me.post_ids.iter().copied().filter_map(NonZeroU32::new).collect(),
         }
     }
 }

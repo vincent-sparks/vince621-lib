@@ -1,4 +1,4 @@
-use std::num::NonZeroU32;
+use std::{marker::PhantomData, num::NonZeroU32, str::FromStr};
 
 use serde::de::{Deserializer, Unexpected};
 //use time::{PrimitiveDateTime};
@@ -27,10 +27,10 @@ pub fn t_or_f<'a,D: Deserializer<'a>>(d: D) -> Result<bool, D::Error> {
     d.deserialize_str(Visitor)
 }
 
-pub fn bracketed_list<'a,D: Deserializer<'a>>(d: D) -> Result<Box<[NonZeroU32]>, D::Error> {
-    struct Visitor;
-    impl serde::de::Visitor<'_> for Visitor {
-        type Value=Box<[NonZeroU32]>;
+pub fn bracketed_list<'a,D: Deserializer<'a>, T: FromStr>(d: D) -> Result<Box<[T]>, D::Error> where T::Err: std::fmt::Display {
+    struct Visitor<T>(PhantomData<T>);
+    impl<T> serde::de::Visitor<'_> for Visitor<T> where T: FromStr, T::Err: std::fmt::Display {
+        type Value=Box<[T]>;
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("a comma-separated list of integers surrounded by {}")
@@ -46,7 +46,7 @@ pub fn bracketed_list<'a,D: Deserializer<'a>>(d: D) -> Result<Box<[NonZeroU32]>,
             }
         }
     }
-    d.deserialize_str(Visitor)
+    d.deserialize_str(Visitor(PhantomData))
 }
 
 //const DATE_FORMAT: &'static [time::format_description::FormatItem] = format_description!("[year]-[month padding:zero]-[day padding:zero] [hour padding:zero]:[minute padding:zero]:[second padding:zero].[subsecond digits:1+]");
