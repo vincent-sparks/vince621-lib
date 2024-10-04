@@ -1,5 +1,5 @@
 #![feature(round_char_boundary)]
-#![feature(new_uninit)]
+#![feature(new_zeroed_alloc)]
 #![feature(try_trait_v2)]
 #![feature(ptr_sub_ptr)]
 #![feature(portable_simd)]
